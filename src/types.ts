@@ -11,3 +11,6 @@ export type GraphNode = {
 };
 export type GraphEdge = { id: string; source: string; target: string; kind: string; line: number };
 export type AnalysisResult = { summary: ProjectSummary; nodes: GraphNode[]; edges: GraphEdge[] };
+export type ProjectRecord = { id: string; name: string; rootPath: string; lastOpenedAt: number; latestSnapshotId: string | null; latestSnapshotAt: number | null };
+export type SnapshotRecord = { id: string; projectId: string; createdAt: number; analyzerVersion: string; rulesVersion: string; parsedFileCount: number; reusedFileCount: number };
+export type ProjectView = { project: ProjectRecord; snapshot: SnapshotRecord; result: AnalysisResult };

@@ -9,19 +9,23 @@ import {
   Plus, RefreshCw, Search, Settings2, Share2, ShieldCheck, Sparkles, Unplug,
   XCircle, ZoomIn, ZoomOut,
 } from "lucide-react";
-import type { AnalysisResult, GraphNode } from "./types";
+import type { AnalysisResult, GraphNode, ProjectRecord, ProjectView, SnapshotRecord } from "./types";
 
-type View = "overview" | "graph" | "modules" | "packages" | "problems";
+type View = "overview" | "graph" | "modules" | "packages" | "problems" | "history";
 const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "overview", label: "Обзор", icon: LayoutDashboard },
   { id: "graph", label: "Зависимости", icon: Network },
   { id: "modules", label: "Модули", icon: Layers3 },
   { id: "packages", label: "Пакеты", icon: Package },
   { id: "problems", label: "Проблемы", icon: AlertTriangle },
+  { id: "history", label: "Снимки", icon: Clock3 },
 ];
 
 function App() {
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
+  const [currentProject, setCurrentProject] = useState<ProjectView | null>(null);
+  const [projects, setProjects] = useState<ProjectRecord[]>([]);
+  const [snapshots, setSnapshots] = useState<SnapshotRecord[]>([]);
   const [view, setView] = useState<View>("overview");
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -31,6 +35,26 @@ function App() {
   const [showPackages, setShowPackages] = useState(true);
   const [detailsOpen, setDetailsOpen] = useState(true);
   const graphSearch = useRef<HTMLInputElement>(null);
+
+  const refreshProjects = async () => setProjects(await invoke<ProjectRecord[]>("list_projects"));
+  useEffect(() => {
+    void invoke<ProjectRecord[]>("list_projects").then(async (saved) => {
+      setProjects(saved);
+      if (saved[0]) {
+        try { showProject(await invoke<ProjectView>("load_project", { projectId: saved[0].id })); }
+        catch (reason) { setError(String(reason)); }
+      }
+    }).catch((reason) => setError(String(reason)));
+  }, []);
+  useEffect(() => {
+    if (!currentProject) { setSnapshots([]); return; }
+    void invoke<SnapshotRecord[]>("list_snapshots", { projectId: currentProject.project.id }).then(setSnapshots).catch((reason) => setError(String(reason)));
+  }, [currentProject?.project.id, currentProject?.snapshot.id]);
+
+  const showProject = (project: ProjectView) => {
+    setCurrentProject(project); setAnalysis(project.result); setSelected(null); setView("overview");
+    void refreshProjects().catch(() => {});
+  };
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -42,7 +66,7 @@ function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   });
 
-  const scan = async (path?: string) => {
+  const scan = async (path?: string, force = false) => {
     let root = path;
     if (!root) {
       const choice = await open({ directory: true, multiple: false, title: "Выберите папку проекта" });
@@ -51,11 +75,29 @@ function App() {
     }
     setBusy(true); setError(null);
     try {
-      const result = await invoke<AnalysisResult>("analyze_project", { root });
-      setAnalysis(result); setSelected(null); setView("overview");
+      if (!force) {
+        const saved = await invoke<ProjectView | null>("open_project", { root });
+        if (saved) { showProject(saved); return; }
+      }
+      const result = await invoke<ProjectView>("analyze_project", { root });
+      showProject(result);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally { setBusy(false); }
+  };
+
+  const openSavedProject = async (id: string) => {
+    setBusy(true); setError(null);
+    try { showProject(await invoke<ProjectView>("load_project", { projectId: id })); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setBusy(false); }
+  };
+
+  const openSnapshot = async (id: string) => {
+    setBusy(true); setError(null);
+    try { showProject(await invoke<ProjectView>("load_snapshot", { snapshotId: id })); setView("history"); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setBusy(false); }
   };
 
   const filteredNodes = useMemo(() => {
@@ -95,21 +137,23 @@ function App() {
             {analysis && <span className="nav-count">{id === "graph" ? analysis.summary.dependencyCount : id === "modules" ? analysis.summary.moduleCount : id === "packages" ? analysis.summary.externalPackageCount : id === "problems" ? analysis.summary.cycleCount + analysis.summary.unresolvedCount + analysis.summary.parseErrorCount : ""}</span>}
           </button>)}
         </nav>
+        <div className="sidebar-caption recent-caption">СОХРАНЁННЫЕ ПРОЕКТЫ</div>
+        <div className="recent-projects">{projects.slice(0, 6).map((project) => <button key={project.id} className={`recent-project ${currentProject?.project.id === project.id ? "selected" : ""}`} onClick={() => void openSavedProject(project.id)} title={project.rootPath}><Folder size={14} /><span>{project.name}</span></button>)}</div>
         <div className="sidebar-divider" />
         <div className="sidebar-caption">БЫСТРЫЕ ДЕЙСТВИЯ</div>
         <button className="quick-action" onClick={() => void scan()}><Plus size={17} /> Открыть проект</button>
-        <button className="quick-action" disabled={!analysis || busy} onClick={() => analysis && void scan(analysis.summary.rootPath)}><RefreshCw size={16} className={busy ? "spin" : ""} /> Пересканировать</button>
-        <div className="sidebar-bottom"><span className="engine-status"><i /> Engine готов</span><span className="version">v0.1.0</span></div>
+        <button className="quick-action" disabled={!analysis || busy} onClick={() => analysis && void scan(analysis.summary.rootPath, true)}><RefreshCw size={16} className={busy ? "spin" : ""} /> Пересканировать</button>
+        <div className="sidebar-bottom"><span className="engine-status"><i /> Engine готов</span><span className="version">v0.2.0</span></div>
       </aside>
 
       <main className={`main-content ${analysis && view === "graph" && detailsOpen ? "with-details" : "without-details"}`}>
         {!analysis ? <Welcome busy={busy} error={error} onOpen={() => void scan()} /> : <>
           <div className="page-heading">
             <div><div className="eyebrow"><span className="crumb">{analysis.summary.name}</span><ArrowRight size={12} /><span>{navItems.find((item) => item.id === view)?.label}</span></div>
-              <h1>{view === "overview" ? "Обзор проекта" : view === "graph" ? "Граф зависимостей" : view === "modules" ? "Модули проекта" : view === "packages" ? "Внешние пакеты" : "Проблемы анализа"}</h1>
+              <h1>{view === "overview" ? "Обзор проекта" : view === "graph" ? "Граф зависимостей" : view === "modules" ? "Модули проекта" : view === "packages" ? "Внешние пакеты" : view === "history" ? "История снимков" : "Проблемы анализа"}</h1>
               <p className="subheading">{view === "overview" ? "Структура и связи, обнаруженные в выбранном репозитории." : `${analysis.summary.rootPath}`}</p>
             </div>
-            <button className="primary-button" disabled={busy} onClick={() => void scan(analysis.summary.rootPath)}>{busy ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{busy ? "Анализируем…" : "Запустить анализ"}</button>
+            <button className="primary-button" disabled={busy} onClick={() => void scan(analysis.summary.rootPath, true)}>{busy ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{busy ? "Анализируем…" : "Запустить анализ"}</button>
           </div>
           {error && <div className="error-banner"><AlertTriangle size={16} />{error}<button onClick={() => setError(null)}><XCircle size={15} /></button></div>}
           {view === "overview" && <Overview analysis={analysis} onOpenGraph={() => setView("graph")} onSelect={setSelected} />}
@@ -117,7 +161,8 @@ function App() {
           {view === "modules" && <ModulesView analysis={analysis} onSelect={(id) => { setSelected(id); setView("graph"); }} />}
           {view === "packages" && <PackagesView analysis={analysis} />}
           {view === "problems" && <ProblemsView analysis={analysis} onSelect={(id) => { setSelected(id); setView("graph"); }} />}
-          <div className="status-line"><span><ShieldCheck size={13} /> Исходный код не запускается</span><span><Clock3 size={13} /> Результаты локального сканирования</span></div>
+          {view === "history" && <HistoryView snapshots={snapshots} current={currentProject?.snapshot.id ?? ""} onOpen={openSnapshot} />}
+          <div className="status-line"><span><ShieldCheck size={13} /> Исходный код не запускается</span><span><Clock3 size={13} /> Снимок {formatDate(currentProject?.snapshot.createdAt ?? 0)} · анализатор {currentProject?.snapshot.analyzerVersion ?? "—"}</span></div>
         </>}
       </main>
 
@@ -223,5 +268,12 @@ function ProblemsView({ analysis, onSelect }: { analysis: AnalysisResult; onSele
 
 function EmptyRow({ text }: { text: string }) { return <div className="empty-row">{text}</div>; }
 function DetailMetric({ label, value }: { label: string; value: string | number }) { return <div className="detail-metric"><span>{label}</span><b>{typeof value === "number" ? value.toLocaleString("ru-RU") : value}</b></div>; }
+
+function formatDate(value: number) { return value ? new Date(value).toLocaleString("ru-RU") : "—"; }
+function HistoryView({ snapshots, current, onOpen }: { snapshots: SnapshotRecord[]; current: string; onOpen: (id: string) => void }) {
+  return <section className="panel history-panel"><div className="panel-heading"><div><span className="eyebrow">СОХРАНЁННЫЕ РЕЗУЛЬТАТЫ</span><h2>{snapshots.length} {snapshots.length === 1 ? "снимок" : "снимков"}</h2></div><Clock3 size={18} className="panel-icon" /></div>
+    {!snapshots.length ? <EmptyRow text="Снимков пока нет. Запустите анализ проекта." /> : <div className="snapshot-list">{snapshots.map((snapshot) => <button key={snapshot.id} className={`snapshot-row ${snapshot.id === current ? "active" : ""}`} onClick={() => onOpen(snapshot.id)}><span className="snapshot-icon"><Clock3 size={16} /></span><span className="snapshot-copy"><b>{formatDate(snapshot.createdAt)}{snapshot.id === current && <i>ОТКРЫТ</i>}</b><small>Анализатор {snapshot.analyzerVersion} · правила {snapshot.rulesVersion}</small><small>Разобрано заново: {snapshot.parsedFileCount} · из кэша: {snapshot.reusedFileCount}</small></span><ArrowRight size={16} /></button>)}</div>}
+  </section>;
+}
 
 export default App;

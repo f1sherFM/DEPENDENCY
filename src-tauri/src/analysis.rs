@@ -1,5 +1,6 @@
 use ignore::WalkBuilder;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
@@ -7,7 +8,7 @@ use std::{
 };
 use tree_sitter::{Language, Node, Parser};
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSummary {
     pub name: String,
@@ -26,14 +27,14 @@ pub struct ProjectSummary {
     pub cycles: Vec<Vec<String>>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LanguageCount {
     pub name: String,
     pub count: usize,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackageInfo {
     pub name: String,
@@ -42,7 +43,7 @@ pub struct PackageInfo {
     pub imported_by: usize,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphNode {
     pub id: String,
@@ -56,7 +57,7 @@ pub struct GraphNode {
     pub declared: Option<bool>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphEdge {
     pub id: String,
@@ -66,7 +67,7 @@ pub struct GraphEdge {
     pub line: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalysisResult {
     pub summary: ProjectSummary,
@@ -79,17 +80,48 @@ struct SourceFile {
     relative: String,
     language: String,
     lines: usize,
-    text: String,
     parse_error: bool,
+    imports: Vec<ImportDecl>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedImport {
+    pub specifier: String,
+    pub kind: String,
+    pub line: usize,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParsedFileCache {
+    pub relative_path: String,
+    pub content_hash: String,
+    pub analyzer_version: String,
+    pub language: String,
+    pub lines: usize,
+    pub parse_error: bool,
+    pub imports: Vec<CachedImport>,
+}
+
+pub struct AnalysisOutput {
+    pub result: AnalysisResult,
+    pub file_cache: Vec<ParsedFileCache>,
+    pub parsed_file_count: usize,
+    pub reused_file_count: usize,
+}
+
+#[derive(Clone)]
 struct ImportDecl {
     specifier: String,
-    kind: &'static str,
+    kind: String,
     line: usize,
 }
 
-pub fn analyze_project(root: &str) -> Result<AnalysisResult, String> {
+pub fn analyze_project(
+    root: &str,
+    cached_files: Vec<ParsedFileCache>,
+) -> Result<AnalysisOutput, String> {
     let root =
         fs::canonicalize(root).map_err(|e| format!("Не удалось открыть каталог проекта: {e}"))?;
     if !root.is_dir() {
@@ -101,6 +133,13 @@ pub fn analyze_project(root: &str) -> Result<AnalysisResult, String> {
         .unwrap_or("Проект")
         .to_owned();
     let mut files = Vec::new();
+    let mut file_cache = Vec::new();
+    let cache_by_path: HashMap<String, ParsedFileCache> = cached_files
+        .into_iter()
+        .map(|item| (normalize(&item.relative_path), item))
+        .collect();
+    let mut parsed_file_count = 0;
+    let mut reused_file_count = 0;
     let mut all_file_paths = HashMap::<String, String>::new();
     let mut total_files = 0usize;
     let excluded = [
@@ -150,19 +189,59 @@ pub fn analyze_project(root: &str) -> Result<AnalysisResult, String> {
         let Some(language) = language_for(entry.path()) else {
             continue;
         };
-        let Ok(text) = fs::read_to_string(entry.path()) else {
+        let Ok(bytes) = fs::read(entry.path()) else {
+            continue;
+        };
+        let content_hash = format!("{:x}", Sha256::digest(&bytes));
+        let Ok(text) = String::from_utf8(bytes) else {
             continue;
         };
         let lines = text.lines().count();
-        let parse_error = parse_imports(&text, language)
-            .map(|(_, error)| error)
-            .unwrap_or(true);
+        let cached = cache_by_path.get(&normalize(&relative)).filter(|item| {
+            item.content_hash == content_hash
+                && item.analyzer_version == crate::storage::ANALYZER_VERSION
+        });
+        let (imports, parse_error) = if let Some(item) = cached {
+            reused_file_count += 1;
+            (
+                item.imports
+                    .iter()
+                    .map(|import| ImportDecl {
+                        specifier: import.specifier.clone(),
+                        kind: import.kind.clone(),
+                        line: import.line,
+                    })
+                    .collect(),
+                item.parse_error,
+            )
+        } else {
+            parsed_file_count += 1;
+            let (imports, error) =
+                parse_imports(&text, language).unwrap_or_else(|_| (Vec::new(), true));
+            (imports, error)
+        };
+        file_cache.push(ParsedFileCache {
+            relative_path: relative.clone(),
+            content_hash,
+            analyzer_version: crate::storage::ANALYZER_VERSION.into(),
+            language: language.label().into(),
+            lines,
+            parse_error,
+            imports: imports
+                .iter()
+                .map(|import| CachedImport {
+                    specifier: import.specifier.clone(),
+                    kind: import.kind.clone(),
+                    line: import.line,
+                })
+                .collect(),
+        });
         files.push(SourceFile {
             relative,
             language: language.label().to_string(),
             lines,
-            text,
             parse_error,
+            imports,
         });
     }
     files.sort_by(|a, b| a.relative.cmp(&b.relative));
@@ -182,12 +261,8 @@ pub fn analyze_project(root: &str) -> Result<AnalysisResult, String> {
         if file.parse_error {
             parse_errors += 1;
         }
-        if let Ok((imports, _)) =
-            parse_imports(&file.text, language_by_label(&file.language).unwrap())
-        {
-            for import in imports {
-                source_imports.push((index, import));
-            }
+        for import in &file.imports {
+            source_imports.push((index, import.clone()));
         }
     }
 
@@ -233,7 +308,7 @@ pub fn analyze_project(root: &str) -> Result<AnalysisResult, String> {
                         id,
                         source: source.relative.clone(),
                         target: target.relative.clone(),
-                        kind: import.kind.into(),
+                        kind: import.kind.clone(),
                         line: import.line,
                     });
                 }
@@ -263,7 +338,7 @@ pub fn analyze_project(root: &str) -> Result<AnalysisResult, String> {
                         id: format!("{}:{}:{}", source.relative, import.line, path),
                         source: source.relative.clone(),
                         target: path,
-                        kind: import.kind.into(),
+                        kind: import.kind.clone(),
                         line: import.line,
                     });
                 }
@@ -353,10 +428,15 @@ pub fn analyze_project(root: &str) -> Result<AnalysisResult, String> {
         packages,
         cycles,
     };
-    Ok(AnalysisResult {
-        summary,
-        nodes,
-        edges,
+    Ok(AnalysisOutput {
+        result: AnalysisResult {
+            summary,
+            nodes,
+            edges,
+        },
+        file_cache,
+        parsed_file_count,
+        reused_file_count,
     })
 }
 
@@ -393,15 +473,6 @@ fn language_for(path: &Path) -> Option<SourceLanguage> {
     }
 }
 
-fn language_by_label(label: &str) -> Option<SourceLanguage> {
-    match label {
-        "JavaScript" => Some(SourceLanguage::JavaScript),
-        "TypeScript" => Some(SourceLanguage::TypeScript),
-        "TSX" => Some(SourceLanguage::Tsx),
-        _ => None,
-    }
-}
-
 fn parse_imports(
     source: &str,
     language: SourceLanguage,
@@ -427,7 +498,8 @@ fn parse_imports(
                                 "type_only_import"
                             } else {
                                 "import"
-                            },
+                            }
+                            .into(),
                             line: node.start_position().row + 1,
                         });
                     }
@@ -439,7 +511,7 @@ fn parse_imports(
                 {
                     imports.push(ImportDecl {
                         specifier,
-                        kind: "reexport",
+                        kind: "reexport".into(),
                         line: node.start_position().row + 1,
                     });
                 }
@@ -461,7 +533,7 @@ fn parse_imports(
                     {
                         imports.push(ImportDecl {
                             specifier,
-                            kind,
+                            kind: kind.into(),
                             line: node.start_position().row + 1,
                         });
                     }
@@ -698,7 +770,7 @@ mod tests {
         assert_eq!(
             imports
                 .iter()
-                .map(|i| (i.specifier.as_str(), i.kind))
+                .map(|i| (i.specifier.as_str(), i.kind.as_str()))
                 .collect::<Vec<_>>(),
             vec![
                 ("./types", "type_only_import"),
@@ -724,7 +796,9 @@ mod tests {
             r#"{"dependencies":{"react":"^19.0.0"}}"#,
         )
         .unwrap();
-        let result = analyze_project(root.path().to_str().unwrap()).unwrap();
+        let result = analyze_project(root.path().to_str().unwrap(), Vec::new())
+            .unwrap()
+            .result;
         assert_eq!(result.summary.source_file_count, 2);
         assert_eq!(result.summary.dependency_count, 3);
         assert_eq!(result.summary.unresolved_count, 0);
@@ -734,14 +808,84 @@ mod tests {
     }
 
     #[test]
+    fn reuses_unchanged_parses_and_keeps_last_snapshot_after_failed_write() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("src")).unwrap();
+        fs::write(
+            root.path().join("src/a.ts"),
+            "import './b';\nexport const a = 1;",
+        )
+        .unwrap();
+        fs::write(root.path().join("src/b.ts"), "export const b = 2;").unwrap();
+        let db = tempdir().unwrap();
+        let state = crate::storage::initialize(db.path().join("dependency.sqlite3")).unwrap();
+
+        let first = analyze_project(root.path().to_str().unwrap(), Vec::new()).unwrap();
+        assert_eq!(first.parsed_file_count, 2);
+        let first = crate::storage::save_snapshot(
+            &state,
+            first.result,
+            first.file_cache,
+            first.parsed_file_count,
+            first.reused_file_count,
+        )
+        .unwrap();
+        let project_id = first.project.id.clone();
+
+        let cache = crate::storage::load_cache(&state, Some(&project_id)).unwrap();
+        let second = analyze_project(root.path().to_str().unwrap(), cache).unwrap();
+        assert_eq!(second.parsed_file_count, 0);
+        assert_eq!(second.reused_file_count, 2);
+        let second = crate::storage::save_snapshot(
+            &state,
+            second.result,
+            second.file_cache,
+            second.parsed_file_count,
+            second.reused_file_count,
+        )
+        .unwrap();
+
+        fs::write(
+            root.path().join("src/a.ts"),
+            "import './b';\nexport const a = 3;",
+        )
+        .unwrap();
+        let cache = crate::storage::load_cache(&state, Some(&project_id)).unwrap();
+        let third = analyze_project(root.path().to_str().unwrap(), cache).unwrap();
+        assert_eq!(third.parsed_file_count, 1);
+        assert_eq!(third.reused_file_count, 1);
+
+        let connection = rusqlite::Connection::open(&state.database_path).unwrap();
+        connection.execute_batch("CREATE TRIGGER reject_snapshot BEFORE INSERT ON snapshots BEGIN SELECT RAISE(ABORT, 'forced test failure'); END;").unwrap();
+        assert!(
+            crate::storage::save_snapshot(
+                &state,
+                third.result,
+                third.file_cache,
+                third.parsed_file_count,
+                third.reused_file_count
+            )
+            .is_err()
+        );
+        let latest = crate::storage::load_project(&state, &project_id).unwrap();
+        assert_eq!(latest.snapshot.id, second.snapshot.id);
+        assert_eq!(
+            crate::storage::list_snapshots(&state, &project_id)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
     fn cycle_detection_handles_long_chains_without_call_stack_recursion() {
         let files: Vec<SourceFile> = (0..10_000)
             .map(|index| SourceFile {
                 relative: format!("src/{index}.ts"),
                 language: "TypeScript".into(),
                 lines: 1,
-                text: String::new(),
                 parse_error: false,
+                imports: Vec::new(),
             })
             .collect();
         let mut edges: Vec<GraphEdge> = files
@@ -769,7 +913,9 @@ mod tests {
     #[test]
     fn scans_this_git_checkout_and_resolves_imported_stylesheet() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let result = analyze_project(root.to_str().unwrap()).unwrap();
+        let result = analyze_project(root.to_str().unwrap(), Vec::new())
+            .unwrap()
+            .result;
         assert!(result.summary.file_count > result.summary.source_file_count);
         assert!(result.summary.source_file_count >= 4);
         assert_eq!(result.summary.unresolved_count, 0);

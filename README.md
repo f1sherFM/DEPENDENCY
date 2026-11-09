@@ -32,4 +32,11 @@ npm run tauri build
 - Resolve relative source imports and imported local assets, and identify npm packages declared in the root `package.json`.
 - Explore the file/package graph, inspect incoming and outgoing links, and see strongly connected dependency groups.
 
-Python, Rust, package lockfile resolution, TypeScript path aliases, persistent snapshots, cancellation, and incremental rescans are not implemented yet. Metrics describe the files and edges that this first analyzer can verify; they do not imply analysis of unsupported languages.
+## Version 0.2: persistent analysis snapshots
+
+- Projects and complete analysis snapshots are stored in a local SQLite database in the application's Windows data directory (`%APPDATA%\com.f1sherfm.dependency\dependency.sqlite3`). The latest project snapshot is restored automatically when the app starts; saved projects and earlier snapshots can also be opened in the sidebar.
+- A snapshot is published only after the graph has been built. The snapshot row, parser cache updates, and latest-snapshot pointer commit in one SQLite transaction, so a failed scan or write leaves the last successful snapshot available.
+- Each snapshot records analyzer and diagnostic-rules versions. Parsed imports are cached per project file by SHA-256 content hash and analyzer version; unchanged file contents reuse cached parser results while file resolution and project-level diagnostics run again.
+- Project source is read and parsed as data only; DEPENDENCY does not execute inspected project files or package scripts.
+
+Python, Rust, package lockfile resolution, TypeScript path aliases, Git comparisons, scan cancellation, and full impact analysis are not implemented yet. Metrics describe the files and edges that this analyzer can verify; they do not imply analysis of unsupported languages.
