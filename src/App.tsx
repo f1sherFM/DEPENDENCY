@@ -1,13 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { RefObject } from "react";
+import { useEffect, useRef, useState } from "react";
+import { GraphView } from "./GraphView";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  AlertTriangle, ArrowDownUp, ArrowLeft, ArrowRight, Box, Braces, Check, ChevronDown,
+  AlertTriangle, ArrowDownUp, ArrowLeft, ArrowRight, Box, Braces, ChevronDown,
   CircleDot, Clock3, Code2, FileCode2, Folder, FolderOpen,
-  Layers3, LayoutDashboard, LoaderCircle, Maximize2, Network, Package, PanelRightClose,
-  Plus, RefreshCw, Search, Settings2, Share2, ShieldCheck, Sparkles, Unplug,
-  XCircle, ZoomIn, ZoomOut,
+  Layers3, LayoutDashboard, LoaderCircle, Network, Package, PanelRightClose,
+  Plus, RefreshCw, XCircle, Settings2, Share2, ShieldCheck, Sparkles, Unplug,
+
 } from "lucide-react";
 import type { AnalysisResult, GraphNode, ProjectRecord, ProjectView, SnapshotRecord } from "./types";
 
@@ -30,9 +30,6 @@ function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
-  const [zoom, setZoom] = useState(1);
-  const [showPackages, setShowPackages] = useState(true);
   const [detailsOpen, setDetailsOpen] = useState(true);
   const graphSearch = useRef<HTMLInputElement>(null);
 
@@ -100,11 +97,6 @@ function App() {
     finally { setBusy(false); }
   };
 
-  const filteredNodes = useMemo(() => {
-    if (!analysis) return [];
-    return analysis.nodes.filter((node) => (showPackages || node.kind !== "package") && (!query || `${node.label} ${node.path}`.toLowerCase().includes(query.toLowerCase())));
-  }, [analysis, query, showPackages]);
-  const filteredIds = useMemo(() => new Set(filteredNodes.map((node) => node.id)), [filteredNodes]);
   const selectedNode = analysis?.nodes.find((node) => node.id === selected) ?? null;
 
   return (
@@ -143,7 +135,7 @@ function App() {
         <div className="sidebar-caption">БЫСТРЫЕ ДЕЙСТВИЯ</div>
         <button className="quick-action" onClick={() => void scan()}><Plus size={17} /> Открыть проект</button>
         <button className="quick-action" disabled={!analysis || busy} onClick={() => analysis && void scan(analysis.summary.rootPath, true)}><RefreshCw size={16} className={busy ? "spin" : ""} /> Пересканировать</button>
-        <div className="sidebar-bottom"><span className="engine-status"><i /> Engine готов</span><span className="version">v0.3.0</span></div>
+        <div className="sidebar-bottom"><span className="engine-status"><i /> Engine готов</span><span className="version">v0.4.0</span></div>
       </aside>
 
       <main className={`main-content ${analysis && view === "graph" && detailsOpen ? "with-details" : "without-details"}`}>
@@ -157,7 +149,7 @@ function App() {
           </div>
           {error && <div className="error-banner"><AlertTriangle size={16} />{error}<button onClick={() => setError(null)}><XCircle size={15} /></button></div>}
           {view === "overview" && <Overview analysis={analysis} onOpenGraph={() => setView("graph")} onSelect={setSelected} />}
-          {view === "graph" && <GraphView nodes={filteredNodes} edges={analysis.edges.filter((edge) => filteredIds.has(edge.source) && filteredIds.has(edge.target))} selected={selected} onSelect={setSelected} query={query} setQuery={setQuery} searchInput={graphSearch} zoom={zoom} setZoom={setZoom} showPackages={showPackages} setShowPackages={setShowPackages} detailsOpen={detailsOpen} setDetailsOpen={setDetailsOpen} />}
+          {view === "graph" && <GraphView key={currentProject?.snapshot.id} analysis={analysis} selected={selected} onSelect={setSelected} searchInput={graphSearch} detailsOpen={detailsOpen} setDetailsOpen={setDetailsOpen} />}
           {view === "modules" && <ModulesView analysis={analysis} onSelect={(id) => { setSelected(id); setView("graph"); }} />}
           {view === "packages" && <PackagesView analysis={analysis} />}
           {view === "problems" && <ProblemsView analysis={analysis} onSelect={(id) => { setSelected(id); setView("graph"); }} />}
@@ -167,7 +159,7 @@ function App() {
       </main>
 
       {analysis && view === "graph" && detailsOpen && <aside className="details-panel"><div className="details-head"><div><span className="sidebar-caption">КОНТЕКСТ</span><h3>{selectedNode ? "Выбранный узел" : "Сводка проекта"}</h3></div><button className="icon-button" onClick={() => setDetailsOpen(false)} aria-label="Скрыть панель"><PanelRightClose size={17} /></button></div>
-        {selectedNode ? <NodeDetails node={selectedNode} analysis={analysis} /> : <>
+        {selectedNode ? <NodeDetails key={selectedNode.id} node={selectedNode} analysis={analysis} onSelect={setSelected} /> : <>
           <div className="detail-empty"><div className="detail-empty-icon"><CircleDot size={20} /></div><b>Выберите узел графа</b><span>Здесь появятся сведения о связях, языке и размере модуля.</span></div>
           <div className="detail-section"><div className="detail-section-title">СОСТАВ ГРАФА</div><DetailMetric label="Исходные файлы" value={analysis.summary.sourceFileCount} /><DetailMetric label="Внутренние связи" value={analysis.summary.dependencyCount} /><DetailMetric label="Внешние пакеты" value={analysis.summary.packages.length} /></div>
           <div className="detail-section"><div className="detail-section-title">ЯЗЫКИ</div>{analysis.summary.languages.map((language) => <div className="language-row" key={language.name}><span><i className="language-dot" />{language.name}</span><b>{language.count}</b></div>)}</div>
@@ -213,38 +205,16 @@ function MiniGraph({ analysis, onSelect }: { analysis: AnalysisResult; onSelect:
   </svg>{analysis.nodes.filter((n) => n.kind === "file").length > 36 && <div className="graph-overflow">Показаны первые 36 узлов предпросмотра. Откройте полный граф для всей выборки.</div>}</div>;
 }
 
-function GraphView({ nodes, edges, selected, onSelect, query, setQuery, searchInput, zoom, setZoom, showPackages, setShowPackages, detailsOpen, setDetailsOpen }: {
-  nodes: GraphNode[]; edges: AnalysisResult["edges"]; selected: string | null; onSelect: (id: string) => void;
-  searchInput: RefObject<HTMLInputElement | null>;
-  query: string; setQuery: (value: string) => void; zoom: number; setZoom: (value: number) => void;
-  showPackages: boolean; setShowPackages: (value: boolean) => void; detailsOpen: boolean; setDetailsOpen: (value: boolean) => void;
-}) {
-  const dims = useMemo(() => { const columns = Math.max(1, Math.ceil(Math.sqrt(nodes.length * 1.8))); return { columns, width: Math.max(900, columns * 220 + 100), height: Math.max(580, Math.ceil(nodes.length / columns) * 100 + 90) }; }, [nodes.length]);
-  const positions = useMemo(() => new Map(nodes.map((node, index) => [node.id, { x: 34 + (index % dims.columns) * 220, y: 34 + Math.floor(index / dims.columns) * 100 }])), [nodes, dims.columns]);
-  const byId = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
-  const incoming = selected ? edges.filter((edge) => edge.target === selected).length : 0;
-  return <div className="graph-workspace"><div className="graph-toolbar"><div className="graph-tabs"><button className="graph-tab active"><Network size={15} /> Файлы</button><button className="graph-tab" disabled title="Агрегированное представление будет добавлено позже"><Layers3 size={15} /> Каталоги</button></div><div className="graph-tools"><label className="graph-search"><Search size={15} /><input ref={searchInput} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск узла…" /><kbd>Ctrl K</kbd></label><label className="filter-check"><input type="checkbox" checked={showPackages} onChange={(event) => setShowPackages(event.target.checked)} /> Пакеты</label><button className="icon-button" onClick={() => setZoom(Math.min(1.6, zoom + 0.1))} title="Приблизить"><ZoomIn size={17} /></button><button className="icon-button" onClick={() => setZoom(Math.max(0.45, zoom - 0.1))} title="Отдалить"><ZoomOut size={17} /></button>{!detailsOpen && <button className="icon-button" onClick={() => setDetailsOpen(true)} title="Показать контекст"><PanelRightClose size={17} /></button>}</div></div>
-    <div className="graph-canvas"><svg viewBox={`0 0 ${dims.width} ${dims.height}`} style={{ width: `${zoom * 100}%`, height: `${zoom * 100}%`, minWidth: `${zoom * 100}%` }} role="img" aria-label="Граф зависимостей файлов и пакетов">
-      <defs><pattern id="dot-grid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#222630" /></pattern><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#6a7690" /></marker></defs><rect width={dims.width} height={dims.height} fill="url(#dot-grid)" />
-      {edges.map((edge) => { const a = positions.get(edge.source); const b = positions.get(edge.target); if (!a || !b) return null; const isActive = selected === edge.source || selected === edge.target; return <path key={edge.id} d={`M ${a.x + 174} ${a.y + 29} C ${(a.x + b.x) / 2 + 60} ${a.y + 29}, ${(a.x + b.x) / 2 - 60} ${b.y + 29}, ${b.x} ${b.y + 29}`} className={`graph-edge ${edge.kind === "type_only_import" ? "type-edge" : ""} ${isActive ? "highlight" : ""}`} markerEnd="url(#arrow)" />; })}
-      {nodes.map((node) => { const p = positions.get(node.id)!; const active = selected === node.id; const matched = !query || `${node.label} ${node.path}`.toLowerCase().includes(query.toLowerCase()); return <g key={node.id} className={`graph-node ${node.kind} ${active ? "selected" : ""} ${matched ? "matched" : "dimmed"}`} transform={`translate(${p.x},${p.y})`} onClick={() => onSelect(node.id)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") onSelect(node.id); }}>
-        <rect width="176" height="58" rx="11" /><rect x="10" y="12" width="32" height="32" rx="9" className="node-icon-bg" />{node.kind === "package" ? <Package x="18" y="20" size={16} /> : node.language ? <FileCode2 x="18" y="20" size={16} /> : <Folder x="18" y="20" size={16} />}<text x="50" y="25" className="node-label">{node.label.length > 15 ? `${node.label.slice(0, 14)}…` : node.label}</text><text x="50" y="43" className="node-caption">{node.kind === "package" ? (node.declared ? "npm · объявлен" : "npm · не объявлен") : node.language ? `${node.language} · ${node.lines} строк` : "Ресурс проекта"}</text><circle cx="163" cy="13" r="3" className="node-dot" />
-      </g>; })}
-    </svg>
-      {!nodes.length && <div className="empty-graph"><Search size={20} /><b>Совпадений нет</b><span>Измените поисковый запрос.</span></div>}
-    </div><div className="graph-footer"><div className="legend"><span><i className="legend-dot internal" />Исходный файл</span><span><i className="legend-dot external" />Внешний пакет</span><span><i className="legend-line" />Импорт</span><span><i className="legend-line type" />Type-only</span></div><span className="graph-count">{nodes.length} узлов · {edges.length} связей</span><button className="icon-button" onClick={() => setZoom(1)} title="Сбросить масштаб"><Maximize2 size={16} /></button></div>
-    {selected && <div className="selection-bar"><span><Check size={14} /> Выбрано: <b>{byId.get(selected)?.path}</b></span><span>{incoming} входящих связей</span><button onClick={() => onSelect("")}><XCircle size={14} /> Сбросить</button></div>}
-  </div>;
-}
-
-function NodeDetails({ node, analysis }: { node: GraphNode; analysis: AnalysisResult }) {
+function NodeDetails({ node, analysis, onSelect }: { node: GraphNode; analysis: AnalysisResult; onSelect: (id: string) => void }) {
+  const [relationLimit, setRelationLimit] = useState(50);
   const inbound = analysis.edges.filter((e) => e.target === node.id); const outbound = analysis.edges.filter((e) => e.source === node.id);
   const resolve = (id: string) => analysis.nodes.find((n) => n.id === id)?.path ?? id;
   const NodeIcon = node.kind === "package" ? Package : FileCode2;
   return <div className="node-details"><div className={`node-detail-icon ${node.kind}`}><NodeIcon size={20} /></div><h2>{node.label}</h2><div className="node-detail-path">{node.path}</div><div className="node-tags"><span>{node.kind === "package" ? "ВНЕШНИЙ ПАКЕТ" : node.language?.toUpperCase() ?? "РЕСУРС"}</span>{node.kind === "package" && <span>{node.declared ? "ОБЪЯВЛЕН" : "НЕ ОБЪЯВЛЕН"}</span>}</div>
     <div className="detail-section"><div className="detail-section-title">МЕТРИКИ</div><DetailMetric label="Строки кода" value={node.lines || "—"} /><DetailMetric label="Входящие" value={node.incoming} /><DetailMetric label="Исходящие" value={node.outgoing} /></div>
-    <div className="detail-section"><div className="detail-section-title">ИМПОРТИРУЕТ</div>{outbound.length ? outbound.slice(0, 10).map((edge) => <div className="relation-row" key={edge.id}><ArrowRight size={13} /><span>{resolve(edge.target)}</span><small>{edge.kind === "type_only_import" ? "type" : edge.kind}</small></div>) : <EmptyRow text="Нет обнаруженных исходящих связей." />}</div>
-    <div className="detail-section"><div className="detail-section-title">ИСПОЛЬЗУЕТСЯ В</div>{inbound.length ? inbound.slice(0, 10).map((edge) => <div className="relation-row" key={edge.id}><ArrowLeft size={13} /><span>{resolve(edge.source)}</span><small>:{edge.line}</small></div>) : <EmptyRow text="Входящие импорты не найдены." />}</div>
+    <div className="detail-section"><div className="detail-section-title">ИМПОРТИРУЕТ · {outbound.length}</div>{outbound.length ? outbound.slice(0, relationLimit).map((edge) => <button className="relation-row relation-link" key={edge.id} onClick={() => onSelect(edge.target)}><ArrowRight size={13} /><span>{resolve(edge.target)}</span><small>{edge.kind === "type_only_import" ? "type" : edge.kind}</small></button>) : <EmptyRow text="Нет обнаруженных исходящих связей." />}</div>
+    <div className="detail-section"><div className="detail-section-title">ИСПОЛЬЗУЕТСЯ В · {inbound.length}</div>{inbound.length ? inbound.slice(0, relationLimit).map((edge) => <button className="relation-row relation-link" key={edge.id} onClick={() => onSelect(edge.source)}><ArrowLeft size={13} /><span>{resolve(edge.source)}</span><small>:{edge.line}</small></button>) : <EmptyRow text="Входящие импорты не найдены." />}</div>
+    {(inbound.length > relationLimit || outbound.length > relationLimit) && <button className="text-button" onClick={() => setRelationLimit(relationLimit + 50)}>Показать ещё связи (сейчас до {relationLimit})</button>}
   </div>;
 }
 

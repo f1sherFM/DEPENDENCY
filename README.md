@@ -47,4 +47,15 @@ npm run tauri build
 - Resolver and diagnostic rules have their own snapshot version. AST cache version is unchanged, so resolver-only changes reuse stored parse results.
 - Node module resolution is implemented by the MIT-licensed `oxc_resolver` Rust crate. DEPENDENCY reads JSON configuration and package metadata without executing project or bundler configuration code.
 
+## Version 0.4: interactive graph exploration
+
+- Directory view groups files by their next path segment. Click a directory to drill down, use Up to return, or switch to the file view. Arrows preserve direction and import kind; their counts represent original imports. Imports inside collapsed directories and across view boundaries are counted separately.
+- Selecting a file or package opens its immediate incoming/outgoing neighborhood. The context panel lists source locations and allows navigation to connected nodes; longer lists load 50 links at a time. This is one-hop exploration, not transitive impact analysis.
+- Search matches file paths before grouping. Filter by import kind or hide external packages. Filters affect the current graph view, not the stored snapshot.
+- Drag the canvas background to pan, use the wheel/buttons to zoom, and Fit to frame the current graph. Connected nodes are arranged in breadth-first columns; arrowheads indicate import direction.
+- Rendering is bounded to 200 nodes and 1,000 aggregated arrows. Omitted nodes/imports are explicitly counted; narrow the search, drill into a directory, or focus a node to inspect large projects. The complete snapshot remains available in SQLite.
+- No schema or analyzer version change is required. Existing snapshots open in the new graph view without rescanning.
+
+Run `npm test` (Node.js 22.18+ or 24+) for graph projection, aggregation, cycle, navigation, filter, and large/dense graph regressions; `npm run build` checks TypeScript and builds the UI. Engine tests run with `cargo test` in `src-tauri`.
+
 Python, Rust, package lockfile resolution, arbitrary executable bundler aliases, Git comparisons, scan cancellation, and full impact analysis are not implemented yet. Metrics describe the files and edges that this analyzer can verify; they do not imply analysis of unsupported languages.

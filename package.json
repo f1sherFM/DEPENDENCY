@@ -1,14 +1,15 @@
 {
   "name": "dependency",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri",
-    "check": "tsc -b"
+    "check": "tsc -b",
+    "test": "node --test tests/graph.test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",
