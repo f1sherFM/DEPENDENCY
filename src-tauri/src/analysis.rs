@@ -87,6 +87,10 @@ pub struct GraphEdge {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalysisResult {
+    #[serde(default)]
+    pub diagnostics: Vec<crate::diagnostics::Diagnostic>,
+    #[serde(default)]
+    pub rules_run: Option<crate::diagnostics::RulesRun>,
     pub summary: ProjectSummary,
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
@@ -144,6 +148,8 @@ pub fn analyze_project(
     if !root.is_dir() {
         return Err("Выбранный путь не является каталогом".into());
     }
+    let settings = crate::diagnostics::Settings::load(&root)?;
+    let mut scan_issues = Vec::<(String, String)>::new();
     let project_name = root
         .file_name()
         .and_then(|v| v.to_str())
@@ -184,13 +190,20 @@ pub fn analyze_project(
     for entry in walker {
         let entry = match entry {
             Ok(value) => value,
-            Err(_) => continue,
+            Err(error) => {
+                scan_issues.push(("Индексирование".into(), error.to_string()));
+                continue;
+            }
         };
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
         total_files += 1;
         let Ok(real_path) = fs::canonicalize(entry.path()) else {
+            scan_issues.push((
+                entry.path().display().to_string(),
+                "Не удалось определить путь файла".into(),
+            ));
             continue;
         };
         if !real_path.starts_with(&root) {
@@ -207,10 +220,12 @@ pub fn analyze_project(
             continue;
         };
         let Ok(bytes) = fs::read(entry.path()) else {
+            scan_issues.push((relative.clone(), "Не удалось прочитать исходник".into()));
             continue;
         };
         let content_hash = format!("{:x}", Sha256::digest(&bytes));
         let Ok(text) = String::from_utf8(bytes) else {
+            scan_issues.push((relative.clone(), "Исходник не в UTF-8".into()));
             continue;
         };
         let lines = text.lines().count();
@@ -534,6 +549,28 @@ pub fn analyze_project(
         .iter()
         .filter(|issue| issue.status == "unresolved")
         .count();
+    let mut manifests: Vec<String> = all_file_paths
+        .values()
+        .filter(|path| {
+            Path::new(path)
+                .file_name()
+                .is_some_and(|name| name == "package.json")
+        })
+        .cloned()
+        .collect();
+    manifests.sort();
+    let (diagnostics, rules_run) = crate::diagnostics::evaluate(
+        settings,
+        crate::diagnostics::RuleInput {
+            root: &root,
+            nodes: &nodes,
+            edges: &edges,
+            cache: &file_cache,
+            issues: &resolution_issues,
+            scan_issues: &scan_issues,
+            manifests: &manifests,
+        },
+    )?;
     let summary = ProjectSummary {
         name: project_name,
         root_path: display_root(&root),
@@ -557,6 +594,8 @@ pub fn analyze_project(
     };
     Ok(AnalysisOutput {
         result: AnalysisResult {
+            diagnostics,
+            rules_run: Some(rules_run),
             summary,
             nodes,
             edges,
@@ -616,20 +655,19 @@ fn parse_imports(
     while let Some(node) = stack.pop() {
         match node.kind() {
             "import_statement" => {
-                if let Some(source_node) = node.child_by_field_name("source") {
-                    let text = node.utf8_text(source.as_bytes()).unwrap_or("");
-                    if let Some(specifier) = string_value(source_node, source) {
-                        imports.push(ImportDecl {
-                            specifier,
-                            kind: if text.trim_start().starts_with("import type") {
-                                "type_only_import"
-                            } else {
-                                "import"
-                            }
-                            .into(),
-                            line: node.start_position().row + 1,
-                        });
-                    }
+                if let Some(source_node) = node.child_by_field_name("source")
+                    && let Some(specifier) = string_value(source_node, source)
+                {
+                    imports.push(ImportDecl {
+                        specifier,
+                        kind: if is_type_only_statement(node) {
+                            "type_only_import"
+                        } else {
+                            "import"
+                        }
+                        .into(),
+                        line: node.start_position().row + 1,
+                    });
                 }
             }
             "export_statement" => {
@@ -638,7 +676,12 @@ fn parse_imports(
                 {
                     imports.push(ImportDecl {
                         specifier,
-                        kind: "reexport".into(),
+                        kind: if is_type_only_statement(node) {
+                            "type_only_import"
+                        } else {
+                            "reexport"
+                        }
+                        .into(),
                         line: node.start_position().row + 1,
                     });
                 }
@@ -680,6 +723,45 @@ fn parse_imports(
             .then_with(|| a.specifier.cmp(&b.specifier))
     });
     Ok((imports, tree.root_node().has_error()))
+}
+
+fn is_type_only_statement(node: Node) -> bool {
+    fn has_type_token(node: Node) -> bool {
+        let mut cursor = node.walk();
+        node.children(&mut cursor)
+            .any(|child| child.kind() == "type")
+    }
+    if has_type_token(node) {
+        return true;
+    }
+    let mut cursor = node.walk();
+    let Some(clause) = node
+        .named_children(&mut cursor)
+        .find(|child| matches!(child.kind(), "import_clause" | "export_clause"))
+    else {
+        return false;
+    };
+    let mut cursor = clause.walk();
+    let children: Vec<_> = clause
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() != "comment")
+        .collect();
+    let specifiers = if clause.kind() == "import_clause" {
+        if children.len() != 1 || children[0].kind() != "named_imports" {
+            return false;
+        }
+        let mut cursor = children[0].walk();
+        children[0]
+            .named_children(&mut cursor)
+            .filter(|child| child.kind() != "comment")
+            .collect::<Vec<_>>()
+    } else {
+        children
+    };
+    !specifiers.is_empty()
+        && specifiers
+            .iter()
+            .all(|specifier| has_type_token(*specifier))
 }
 
 fn string_value(node: Node, source: &str) -> Option<String> {
@@ -949,77 +1031,13 @@ fn discover_workspace_packages(
 }
 
 fn find_cycles(files: &[SourceFile], edges: &[GraphEdge]) -> Vec<Vec<String>> {
-    let file_ids: HashSet<&str> = files.iter().map(|f| f.relative.as_str()).collect();
-    let mut adjacency = HashMap::<String, Vec<String>>::new();
-    let mut reverse = HashMap::<String, Vec<String>>::new();
-    for edge in edges
-        .iter()
-        .filter(|e| file_ids.contains(e.source.as_str()) && file_ids.contains(e.target.as_str()))
-    {
-        adjacency
-            .entry(edge.source.clone())
-            .or_default()
-            .push(edge.target.clone());
-        reverse
-            .entry(edge.target.clone())
-            .or_default()
-            .push(edge.source.clone());
-    }
-    // Iterative Kosaraju avoids recursion depth failures on long import chains.
-    let mut visited = HashSet::<String>::new();
-    let mut finish_order = Vec::with_capacity(files.len());
-    for file in files {
-        if visited.contains(&file.relative) {
-            continue;
-        }
-        let mut stack = vec![(file.relative.clone(), false)];
-        while let Some((node, expanded)) = stack.pop() {
-            if expanded {
-                finish_order.push(node);
-                continue;
-            }
-            if !visited.insert(node.clone()) {
-                continue;
-            }
-            stack.push((node.clone(), true));
-            if let Some(neighbors) = adjacency.get(&node) {
-                for neighbor in neighbors.iter().rev() {
-                    if !visited.contains(neighbor) {
-                        stack.push((neighbor.clone(), false));
-                    }
-                }
-            }
-        }
-    }
-    visited.clear();
-    let mut result = Vec::new();
-    for node in finish_order.into_iter().rev() {
-        if !visited.insert(node.clone()) {
-            continue;
-        }
-        let mut component = Vec::new();
-        let mut stack = vec![node.clone()];
-        while let Some(current) = stack.pop() {
-            component.push(current.clone());
-            if let Some(neighbors) = reverse.get(&current) {
-                for neighbor in neighbors {
-                    if visited.insert(neighbor.clone()) {
-                        stack.push(neighbor.clone());
-                    }
-                }
-            }
-        }
-        let self_loop = component.len() == 1
-            && adjacency
-                .get(&component[0])
-                .is_some_and(|neighbors| neighbors.contains(&component[0]));
-        if component.len() > 1 || self_loop {
-            component.sort();
-            result.push(component);
-        }
-    }
-    result.sort_by(|a, b| a.first().cmp(&b.first()));
-    result
+    crate::diagnostics::cyclic_components(
+        &files
+            .iter()
+            .map(|file| file.relative.clone())
+            .collect::<Vec<_>>(),
+        edges,
+    )
 }
 
 #[cfg(test)]
@@ -1042,6 +1060,28 @@ mod tests {
                 ("./types", "type_only_import"),
                 ("./util", "reexport"),
                 ("./lazy", "dynamic_import")
+            ]
+        );
+    }
+
+    #[test]
+    fn classifies_type_only_exports_and_inline_specifiers_without_confusing_mixed_imports() {
+        let source = "export type { A } from './a';\nexport { type B } from './b';\nimport { type C } from './c';\nimport type /*comment*/ { D } from './d';\nimport { type E, value } from './e';\nimport Default, { type F } from './f';\nimport { type as value } from './g';";
+        let (imports, error) = parse_imports(source, SourceLanguage::TypeScript).unwrap();
+        assert!(!error);
+        assert_eq!(
+            imports
+                .iter()
+                .map(|item| item.kind.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "type_only_import",
+                "type_only_import",
+                "type_only_import",
+                "type_only_import",
+                "import",
+                "import",
+                "import"
             ]
         );
     }

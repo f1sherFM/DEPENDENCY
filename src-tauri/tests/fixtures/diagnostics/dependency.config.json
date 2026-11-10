@@ -1,0 +1,1 @@
+{"rules":{"high-fan-out":{"threshold":1},"high-fan-in":{"threshold":1}}}

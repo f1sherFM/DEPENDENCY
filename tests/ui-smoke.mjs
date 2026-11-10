@@ -1,0 +1,126 @@
+// Optional browser smoke test. Uses a real engine JSON dump and mocks only Tauri IPC.
+// node tests/ui-smoke.mjs <analysis.json> <chromium.exe> [output-directory]
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { readFile, writeFile, mkdtemp } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { resolve, extname, join } from 'node:path';
+
+const [fixturePath, browserPath, outputPath] = process.argv.slice(2);
+assert.ok(fixturePath && browserPath, 'Pass an engine JSON dump and a Chromium executable');
+const analysis = JSON.parse(await readFile(fixturePath, 'utf8'));
+const output = outputPath || await mkdtemp(join(tmpdir(), 'dependency-ui-'));
+const profile = await mkdtemp(join(tmpdir(), 'dependency-browser-'));
+const server = createServer(async (request, response) => {
+  try {
+    const url = new URL(request.url, 'http://localhost');
+    const path = resolve('dist', `.${url.pathname === '/' ? '/index.html' : url.pathname}`);
+    assert.ok(path.startsWith(resolve('dist') + '\\') || path.startsWith(resolve('dist') + '/'));
+    response.setHeader('Content-Type', ({ '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' })[extname(path)] || 'application/octet-stream');
+    response.end(await readFile(path));
+  } catch { response.statusCode = 404; response.end(); }
+});
+await new Promise(done => server.listen(0, '127.0.0.1', done));
+const origin = `http://127.0.0.1:${server.address().port}`;
+const child = spawn(browserPath, ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--window-size=1520,1000', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+let socket;
+try {
+  let debugging = '';
+  const endpoint = await new Promise((done, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Chromium debugging endpoint timeout')), 15000);
+    child.on('error', reject);
+    child.stderr.on('data', chunk => {
+      debugging += chunk;
+      const match = debugging.match(/DevTools listening on (ws:\/\/[^\s]+)/);
+      if (match) { clearTimeout(timeout); done(match[1]); }
+    });
+  });
+  const port = new URL(endpoint).port;
+  const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+  socket = new WebSocket(pages.find(page => page.type === 'page').webSocketDebuggerUrl);
+  await new Promise(done => socket.addEventListener('open', done, { once: true }));
+  let serial = 0; const waiting = new Map(); const exceptions = [];
+  socket.addEventListener('message', event => {
+    const message = JSON.parse(event.data);
+    if (message.method === 'Runtime.exceptionThrown') exceptions.push(message.params.exceptionDetails);
+    if (message.id && waiting.has(message.id)) {
+      const { done, reject, timeout } = waiting.get(message.id); clearTimeout(timeout); waiting.delete(message.id);
+      if (message.error) reject(new Error(JSON.stringify(message.error))); else done(message.result);
+    }
+  });
+  const send = (method, params = {}) => new Promise((done, reject) => {
+    const id = ++serial;
+    const timeout = setTimeout(() => { waiting.delete(id); reject(new Error(`${method} timeout`)); }, 15000);
+    waiting.set(id, { done, reject, timeout }); socket.send(JSON.stringify({ id, method, params }));
+  });
+  const evaluate = async expression => {
+    const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+    if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
+    return result.result.value;
+  };
+  const wait = async expression => {
+    for (let i = 0; i < 100; i++) { if (await evaluate(`Boolean(${expression})`)) return; await new Promise(done => setTimeout(done, 100)); }
+    throw new Error(`UI condition failed: ${expression}`);
+  };
+  const bridge = result => `(() => {
+    const result = ${JSON.stringify(result)};
+    const project = { id: 'test-project', name: result.summary.name, rootPath: result.summary.rootPath, lastOpenedAt: 0, latestSnapshotId: 'snapshot', latestSnapshotAt: 0 };
+    const snapshot = { id: 'snapshot', projectId: project.id, createdAt: 0, analyzerVersion: 'test-dump', rulesVersion: result.rulesRun?.version ?? 'legacy', parsedFileCount: 0, reusedFileCount: 0 };
+    window.__TAURI_INTERNALS__ = { invoke: async cmd => {
+      if (cmd === 'list_projects') return [project];
+      if (cmd === 'list_snapshots') return [snapshot];
+      if (cmd === 'load_project' || cmd === 'load_snapshot') return { project, snapshot, result };
+      throw new Error('Unexpected IPC: ' + cmd);
+    }};
+  })();`;
+  await send('Runtime.enable'); await send('Page.enable');
+  await send('Page.addScriptToEvaluateOnNewDocument', { source: bridge(analysis) });
+  await send('Page.navigate', { url: origin });
+  await wait(`document.querySelector('.main-nav') && document.querySelector('.stat-card')`);
+  await evaluate(`document.querySelectorAll('.main-nav button')[4].click()`);
+  await wait(`document.querySelector('.diagnostics-coverage') && document.querySelector('.diagnostic-card')`);
+  assert.ok(await evaluate(`document.querySelector('.diagnostics-coverage').textContent.includes('Архитектурных предупреждений')`));
+  await evaluate(`(() => { const select=document.querySelector('.diagnostics-filters select'); select.value='dependency-cycle'; select.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+  await wait(`document.querySelector('.diagnostic-card')?.textContent.includes('Подтверждённый замкнутый маршрут')`);
+  const screenshot = await send('Page.captureScreenshot', { format: 'png' });
+  await writeFile(join(output, 'diagnostics.png'), Buffer.from(screenshot.data, 'base64'));
+  await evaluate(`document.querySelector('.diagnostic-card .text-button:last-child').click()`);
+  await wait(`document.querySelector('.graph-workspace .graph-navigation code')?.textContent === 'dependency-cycle'`);
+  assert.ok(await evaluate(`document.querySelectorAll('.graph-node').length > 0`));
+  assert.ok(await evaluate(`document.querySelectorAll('.graph-edge').length > 0`));
+  await evaluate(`Array.from(document.querySelectorAll('.graph-navigation button')).find(button=>button.textContent==='К диагностике').click()`);
+  await wait(`document.querySelector('.diagnostics-filters')`);
+  await evaluate(`document.querySelectorAll('.main-nav button')[1].click()`);
+  await wait(`document.querySelector('.graph-workspace')`);
+  await evaluate(`Array.from(document.querySelectorAll('.graph-navigation button')).find(button=>button.textContent==='Весь проект').click()`);
+  await wait(`document.querySelector('.graph-node.directory')`);
+  await evaluate(`document.querySelector('.graph-node.directory').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
+  await wait(`Array.from(document.querySelectorAll('.graph-navigation button')).some(button=>button.textContent==='Выше')`);
+  const graphShot = await send('Page.captureScreenshot', { format: 'png' });
+  await writeFile(join(output, 'graph.png'), Buffer.from(graphShot.data, 'base64'));
+  const large = structuredClone(analysis);
+  large.diagnostics = Array.from({ length: 125 }, (_, index) => ({ ...analysis.diagnostics[0], id: `large-${index}` }));
+  await send('Page.addScriptToEvaluateOnNewDocument', { source: bridge(large) });
+  await send('Page.reload'); await wait(`document.querySelector('.stat-card')`);
+  await evaluate(`document.querySelectorAll('.main-nav button')[4].click()`);
+  await wait(`document.querySelectorAll('.diagnostic-card').length === 50`);
+  await evaluate(`document.querySelector('.problems-list > button').click()`);
+  await wait(`document.querySelectorAll('.diagnostic-card').length === 100`);
+  const empty = structuredClone(analysis); empty.diagnostics = [];
+  await send('Page.addScriptToEvaluateOnNewDocument', { source: bridge(empty) });
+  await send('Page.reload'); await wait(`document.querySelector('.stat-card')`);
+  await evaluate(`document.querySelectorAll('.main-nav button')[4].click()`);
+  await wait(`document.querySelector('.all-clear')?.textContent.includes('Правила не выдали диагностик')`);
+  const legacy = structuredClone(analysis); legacy.rulesRun = null; legacy.diagnostics = [];
+  await send('Page.addScriptToEvaluateOnNewDocument', { source: bridge(legacy) });
+  await send('Page.reload');
+  await wait(`document.querySelector('.stat-card')`);
+  await evaluate(`document.querySelectorAll('.main-nav button')[4].click()`);
+  await wait(`document.querySelector('.diagnostics-coverage')?.textContent.includes('расширенная диагностика не выполнялась')`);
+  assert.equal(await evaluate(`document.querySelectorAll('.cycle-path').length`), 0);
+  assert.equal(exceptions.length, 0, JSON.stringify(exceptions));
+  console.log(`PASS: real engine diagnostics, rule filtering, graph scope, directory drill-down, large/empty lists, legacy snapshot; screenshots: ${output}`);
+} finally {
+  socket?.close(); child.kill(); await new Promise(done => server.close(done));
+}

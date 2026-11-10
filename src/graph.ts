@@ -6,6 +6,7 @@ export type GraphOptions = {
   mode: "files" | "directories"; directory: string; query: string; showPackages: boolean;
   edgeKind: string; focus: string | null; direction: "both" | "incoming" | "outgoing";
   limit: number;
+  nodeIds?: readonly string[] | null;
 };
 
 // A view of a snapshot: aggregation and filtering never mutate analysis data.
@@ -27,7 +28,9 @@ export function projectGraph(nodes: GraphNode[], edges: GraphEdge[], options: Gr
   const displayed = new Map<string, DisplayNode>();
   const membership = new Map<string, string>();
   const prefix = options.directory ? `${options.directory}/` : "";
+  const scope = options.nodeIds ? new Set(options.nodeIds) : null;
   for (const node of eligible) {
+    if (scope && !scope.has(node.id)) continue;
     if (focusIds && !focusIds.has(node.id)) continue;
     if (node.kind !== "package" && !node.path.startsWith(prefix)) continue;
     const remainder = node.path.slice(prefix.length);

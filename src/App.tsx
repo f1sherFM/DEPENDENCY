@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { GraphView } from "./GraphView";
+import { ProblemsView } from "./ProblemsView";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -9,7 +10,7 @@ import {
   Plus, RefreshCw, XCircle, Settings2, Share2, ShieldCheck, Sparkles, Unplug,
 
 } from "lucide-react";
-import type { AnalysisResult, GraphNode, ProjectRecord, ProjectView, SnapshotRecord } from "./types";
+import type { AnalysisResult, Diagnostic, GraphNode, ProjectRecord, ProjectView, SnapshotRecord } from "./types";
 
 type View = "overview" | "graph" | "modules" | "packages" | "problems" | "history";
 const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
@@ -27,6 +28,7 @@ function App() {
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [snapshots, setSnapshots] = useState<SnapshotRecord[]>([]);
   const [view, setView] = useState<View>("overview");
+  const [graphDiagnostic, setGraphDiagnostic] = useState<Diagnostic | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -49,7 +51,7 @@ function App() {
   }, [currentProject?.project.id, currentProject?.snapshot.id]);
 
   const showProject = (project: ProjectView) => {
-    setCurrentProject(project); setAnalysis(project.result); setSelected(null); setView("overview");
+    setCurrentProject(project); setAnalysis(project.result); setGraphDiagnostic(null); setSelected(null); setView("overview");
     void refreshProjects().catch(() => {});
   };
 
@@ -97,6 +99,7 @@ function App() {
     finally { setBusy(false); }
   };
 
+  const selectNode = (id: string) => { setSelected(id); if (!graphDiagnostic?.nodeIds.includes(id)) setGraphDiagnostic(null); };
   const selectedNode = analysis?.nodes.find((node) => node.id === selected) ?? null;
 
   return (
@@ -126,7 +129,7 @@ function App() {
         <nav className="main-nav" aria-label="Разделы проекта">
           {navItems.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${view === id ? "active" : ""}`} onClick={() => setView(id)}>
             <Icon size={18} strokeWidth={1.8} /><span>{label}</span>
-            {analysis && <span className="nav-count">{id === "graph" ? analysis.summary.dependencyCount : id === "modules" ? analysis.summary.moduleCount : id === "packages" ? analysis.summary.externalPackageCount : id === "problems" ? analysis.summary.cycleCount + analysis.summary.unresolvedCount + analysis.summary.ambiguousCount + analysis.summary.parseErrorCount : ""}</span>}
+            {analysis && <span className="nav-count">{id === "graph" ? analysis.summary.dependencyCount : id === "modules" ? analysis.summary.moduleCount : id === "packages" ? analysis.summary.externalPackageCount : id === "problems" ? (analysis.rulesRun ? analysis.diagnostics.filter(item => item.severity !== "info").length : analysis.summary.cycleCount + analysis.summary.unresolvedCount + analysis.summary.ambiguousCount + analysis.summary.parseErrorCount) : ""}</span>}
           </button>)}
         </nav>
         <div className="sidebar-caption recent-caption">СОХРАНЁННЫЕ ПРОЕКТЫ</div>
@@ -135,7 +138,7 @@ function App() {
         <div className="sidebar-caption">БЫСТРЫЕ ДЕЙСТВИЯ</div>
         <button className="quick-action" onClick={() => void scan()}><Plus size={17} /> Открыть проект</button>
         <button className="quick-action" disabled={!analysis || busy} onClick={() => analysis && void scan(analysis.summary.rootPath, true)}><RefreshCw size={16} className={busy ? "spin" : ""} /> Пересканировать</button>
-        <div className="sidebar-bottom"><span className="engine-status"><i /> Engine готов</span><span className="version">v0.4.0</span></div>
+        <div className="sidebar-bottom"><span className="engine-status"><i /> Engine готов</span><span className="version">v0.5.0</span></div>
       </aside>
 
       <main className={`main-content ${analysis && view === "graph" && detailsOpen ? "with-details" : "without-details"}`}>
@@ -149,17 +152,17 @@ function App() {
           </div>
           {error && <div className="error-banner"><AlertTriangle size={16} />{error}<button onClick={() => setError(null)}><XCircle size={15} /></button></div>}
           {view === "overview" && <Overview analysis={analysis} onOpenGraph={() => setView("graph")} onSelect={setSelected} />}
-          {view === "graph" && <GraphView key={currentProject?.snapshot.id} analysis={analysis} selected={selected} onSelect={setSelected} searchInput={graphSearch} detailsOpen={detailsOpen} setDetailsOpen={setDetailsOpen} />}
-          {view === "modules" && <ModulesView analysis={analysis} onSelect={(id) => { setSelected(id); setView("graph"); }} />}
+          {view === "graph" && <GraphView key={currentProject?.snapshot.id} analysis={analysis} selected={selected} onSelect={selectNode} searchInput={graphSearch} detailsOpen={detailsOpen} setDetailsOpen={setDetailsOpen} diagnostic={graphDiagnostic} onClearDiagnostic={() => setGraphDiagnostic(null)} onOpenDiagnostic={() => setView("problems")} />}
+          {view === "modules" && <ModulesView analysis={analysis} onSelect={(id) => { selectNode(id); setView("graph"); }} />}
           {view === "packages" && <PackagesView analysis={analysis} />}
-          {view === "problems" && <ProblemsView analysis={analysis} onSelect={(id) => { setSelected(id); setView("graph"); }} />}
+          {view === "problems" && <ProblemsView key={currentProject?.snapshot.id} activeDiagnosticId={graphDiagnostic?.id} analysis={analysis} onShowGraph={(diagnostic) => { setGraphDiagnostic(diagnostic); setSelected(null); setView("graph"); }} onSelect={(id) => { selectNode(id); setView("graph"); }} />}
           {view === "history" && <HistoryView snapshots={snapshots} current={currentProject?.snapshot.id ?? ""} onOpen={openSnapshot} />}
           <div className="status-line"><span><ShieldCheck size={13} /> Исходный код не запускается</span><span><Clock3 size={13} /> Снимок {formatDate(currentProject?.snapshot.createdAt ?? 0)} · анализатор {currentProject?.snapshot.analyzerVersion ?? "—"}</span></div>
         </>}
       </main>
 
       {analysis && view === "graph" && detailsOpen && <aside className="details-panel"><div className="details-head"><div><span className="sidebar-caption">КОНТЕКСТ</span><h3>{selectedNode ? "Выбранный узел" : "Сводка проекта"}</h3></div><button className="icon-button" onClick={() => setDetailsOpen(false)} aria-label="Скрыть панель"><PanelRightClose size={17} /></button></div>
-        {selectedNode ? <NodeDetails key={selectedNode.id} node={selectedNode} analysis={analysis} onSelect={setSelected} /> : <>
+        {selectedNode ? <NodeDetails key={selectedNode.id} node={selectedNode} analysis={analysis} onSelect={selectNode} /> : <>
           <div className="detail-empty"><div className="detail-empty-icon"><CircleDot size={20} /></div><b>Выберите узел графа</b><span>Здесь появятся сведения о связях, языке и размере модуля.</span></div>
           <div className="detail-section"><div className="detail-section-title">СОСТАВ ГРАФА</div><DetailMetric label="Исходные файлы" value={analysis.summary.sourceFileCount} /><DetailMetric label="Внутренние связи" value={analysis.summary.dependencyCount} /><DetailMetric label="Внешние пакеты" value={analysis.summary.packages.length} /></div>
           <div className="detail-section"><div className="detail-section-title">ЯЗЫКИ</div>{analysis.summary.languages.map((language) => <div className="language-row" key={language.name}><span><i className="language-dot" />{language.name}</span><b>{language.count}</b></div>)}</div>
@@ -225,15 +228,6 @@ function ModulesView({ analysis, onSelect }: { analysis: AnalysisResult; onSelec
 
 function PackagesView({ analysis }: { analysis: AnalysisResult }) {
   return <section className="panel table-panel"><div className="table-toolbar"><div><b>{analysis.summary.externalPackageCount}</b><span>пакетов объявлено в package.json</span></div><div className="table-tools"><span className="table-chip"><Package size={13} /> npm</span></div></div><div className="table-wrap"><table><thead><tr><th>ПАКЕТ</th><th>ЗАДАННЫЙ ДИАПАЗОН</th><th>СОСТОЯНИЕ</th><th>ИМПОРТОВ</th></tr></thead><tbody>{analysis.summary.packages.map((pkg) => <tr key={pkg.name}><td><span className="file-cell package-cell"><Package size={16} />{pkg.name}</span></td><td><code>{pkg.version}</code></td><td><span className={`status-chip ${pkg.dependencyType === "объявлен" ? "ok" : "warning"}`}>{pkg.dependencyType}</span></td><td>{pkg.importedBy}</td></tr>)}</tbody></table>{!analysis.summary.packages.length && <div className="table-empty"><Package size={21} /><b>Импортируемые пакеты не найдены</b><span>Граф отражает пакеты, которые удалось извлечь из импортов.</span></div>}</div><p className="table-note">Для первой версии считывается package.json. Обновления и уязвимости не запрашиваются.</p></section>;
-}
-
-function ProblemsView({ analysis, onSelect }: { analysis: AnalysisResult; onSelect: (id: string) => void }) {
-  const { summary } = analysis;
-  return <section className="problems-list">{summary.cycles.map((cycle, index) => <article className="problem-card" key={cycle.join("|")}><div className="problem-icon danger"><RefreshCw size={18} /></div><div className="problem-copy"><span className="problem-severity red">ЦИКЛ · {index + 1}</span><b>Циклическая зависимость</b><div className="cycle-path">{cycle.map((id, i) => <span key={id}><button onClick={() => onSelect(id)}>{id}</button>{i < cycle.length - 1 && <ArrowRight size={12} />}</span>)}<ArrowRight size={12} /><button onClick={() => onSelect(cycle[0])}>{cycle[0]}</button></div></div></article>)}
-    {summary.resolutionIssues.map((issue) => <article className="problem-card" key={`${issue.source}:${issue.line}:${issue.specifier}`}><div className={`problem-icon ${issue.status === "external" ? "info" : "warn"}`}><Unplug size={18} /></div><div className="problem-copy"><span className={`problem-severity ${issue.status === "external" ? "blue" : "amber"}`}>{issue.status === "external" ? "ВНЕШНЯЯ ССЫЛКА" : issue.status === "ambiguous" ? "НЕОДНОЗНАЧНО" : "НЕ РАЗРЕШЕНО"}</span><b><code>{issue.specifier}</code></b><button className="issue-source" onClick={() => onSelect(issue.source)}>{issue.source}:{issue.line}</button><p>{issue.reason}</p>{issue.attemptedCandidates.length > 0 && <div className="issue-candidates"><small>Проверено / сообщено resolver’ом:</small>{issue.attemptedCandidates.map((candidate) => <code key={candidate}>{candidate}</code>)}</div>}<p className="issue-hint">{issue.hint}</p></div></article>)}
-    {summary.parseErrorCount > 0 && <article className="problem-card"><div className="problem-icon warn"><AlertTriangle size={18} /></div><div className="problem-copy"><span className="problem-severity amber">ПОКРЫТИЕ</span><b>Файлы с синтаксическими ошибками</b><p>{summary.parseErrorCount} файлов не прошли полный разбор; дерево AST может содержать частичные результаты.</p></div></article>}
-    {!summary.cycleCount && !summary.resolutionIssues.length && !summary.parseErrorCount && <div className="all-clear"><div><ShieldCheck size={26} /></div><h2>Критичных проблем анализа нет</h2><p>В текущем снимке не обнаружены циклы, неразрешённые импорты или ошибки разбора.</p></div>}
-  </section>;
 }
 
 function EmptyRow({ text }: { text: string }) { return <div className="empty-row">{text}</div>; }

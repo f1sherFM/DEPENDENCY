@@ -1,4 +1,5 @@
 mod analysis;
+mod diagnostics;
 mod resolver;
 mod storage;
 

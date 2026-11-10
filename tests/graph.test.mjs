@@ -83,3 +83,13 @@ test('dense graph also caps rendered arrows and reports omitted imports', () => 
   assert.equal(result.hiddenEdges, edges.length - 1000);
   assert.equal(result.hiddenNodes, 0);
 });
+
+test('diagnostic scope includes the whole SCC and retains its internal edges', () => {
+  const nodes = ['a', 'b', 'c', 'outside'].map(path => node(path));
+  const edges = [edge('a', 'c'), edge('c', 'b'), edge('b', 'a'), edge('a', 'outside')];
+  const result = projectGraph(nodes, edges, { ...options, mode: 'files', nodeIds: ['a', 'b', 'c'] });
+  assert.equal(result.nodes.length, 3);
+  assert.equal(result.edges.length, 3);
+  assert.equal(result.boundaryEdges, 1);
+  assert.ok(!result.nodes.some(n => n.id === 'outside'));
+});

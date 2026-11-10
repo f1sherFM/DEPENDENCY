@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
 import { ArrowLeft, FileCode2, Folder, Maximize2, Network, Package, PanelRightClose, Search, ZoomIn, ZoomOut } from "lucide-react";
-import type { AnalysisResult } from "./types";
+import type { AnalysisResult, Diagnostic } from "./types";
 import { layoutGraph, projectGraph } from "./graph";
 
-export function GraphView({ analysis, selected, onSelect, searchInput, detailsOpen, setDetailsOpen }: {
+export function GraphView({ analysis, selected, onSelect, searchInput, detailsOpen, setDetailsOpen, diagnostic, onClearDiagnostic, onOpenDiagnostic }: {
   analysis: AnalysisResult; selected: string | null; onSelect: (id: string) => void;
   searchInput: RefObject<HTMLInputElement | null>; detailsOpen: boolean; setDetailsOpen: (value: boolean) => void;
+  diagnostic: Diagnostic | null; onClearDiagnostic: () => void; onOpenDiagnostic: () => void;
 }) {
   const [mode, setMode] = useState<"files" | "directories">("directories");
   const [directory, setDirectory] = useState("");
@@ -20,8 +21,8 @@ export function GraphView({ analysis, selected, onSelect, searchInput, detailsOp
   const canvas = useRef<HTMLDivElement>(null);
   const drag = useRef<{ x: number; y: number; cameraX: number; cameraY: number } | null>(null);
   const view = useMemo(() => projectGraph(analysis.nodes, analysis.edges, {
-    mode, directory, query, showPackages, edgeKind, focus, direction, limit: 200,
-  }), [analysis, mode, directory, query, showPackages, edgeKind, focus, direction]);
+    mode, directory, query, showPackages, edgeKind, focus, direction, limit: 200, nodeIds: diagnostic?.nodeIds,
+  }), [analysis, mode, directory, query, showPackages, edgeKind, focus, direction, diagnostic]);
   const layout = useMemo(() => layoutGraph(view.nodes, view.edges, focus), [view, focus]);
   const kinds = useMemo(() => [...new Set(analysis.edges.map(edge => edge.kind))].sort(), [analysis]);
   const selectedNode = analysis.nodes.find(node => node.id === selected);
@@ -36,16 +37,18 @@ export function GraphView({ analysis, selected, onSelect, searchInput, detailsOp
   }, []);
   useEffect(() => { fit(); }, [layout, viewport.width, viewport.height]);
   useEffect(() => {
+    if (diagnostic) { setMode("files"); setDirectory(""); setQuery(""); setEdgeKind(""); setShowPackages(true); setFocus(null); return; }
     if (!selected) return;
     // A jump from the context panel must reveal its target, even across filters.
     setMode("files"); setDirectory(""); setQuery(""); setShowPackages(true); setFocus(selected);
-  }, [selected]);
+  }, [selected, diagnostic]);
   const zoomAt = (factor: number, x = viewport.width / 2, y = viewport.height / 2) => setCamera(previous => {
     const zoom = Math.max(0.02, Math.min(3, previous.zoom * factor));
     return { zoom, x: x - (x - previous.x) * zoom / previous.zoom, y: y - (y - previous.y) * zoom / previous.zoom };
   });
-  const reset = () => { setMode("directories"); setDirectory(""); setQuery(""); setEdgeKind(""); setFocus(null); setShowPackages(true); onSelect(""); };
+  const reset = () => { onClearDiagnostic(); setMode("directories"); setDirectory(""); setQuery(""); setEdgeKind(""); setFocus(null); setShowPackages(true); onSelect(""); };
   return <div className="graph-workspace">
+    {diagnostic && <div className="graph-navigation"><b>{diagnostic.title}</b><code>{diagnostic.ruleId}</code><button onClick={onOpenDiagnostic}>К диагностике</button><button onClick={reset}>Весь проект</button></div>}
     <div className="graph-toolbar"><div className="graph-tabs">
       <button className={`graph-tab ${mode === "files" ? "active" : ""}`} onClick={() => setMode("files")}><FileCode2 size={15} />Файлы</button>
       <button className={`graph-tab ${mode === "directories" ? "active" : ""}`} onClick={() => { setMode("directories"); setFocus(null); }}> <Folder size={15} />Каталоги</button>
@@ -78,7 +81,7 @@ export function GraphView({ analysis, selected, onSelect, searchInput, detailsOp
           })}
           {view.nodes.map(node => { const p = layout.positions.get(node.id)!; const Icon = node.kind === "directory" ? Folder : node.kind === "package" ? Package : FileCode2;
             const activate = () => { if (node.kind === "directory") { setDirectory(node.path); setFocus(null); } else onSelect(node.id); };
-            return <g key={node.id} role="button" aria-label={`${node.kind === "directory" ? "Открыть каталог" : "Выбрать"} ${node.path}`} className={`graph-node ${node.kind} ${selected === node.id ? "selected" : ""}`} transform={`translate(${p.x},${p.y})`} onClick={activate} tabIndex={0} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(); } }}>
+            return <g key={node.id} role="button" aria-label={`${node.kind === "directory" ? "Открыть каталог" : "Выбрать"} ${node.path}`} className={`graph-node ${node.kind} ${diagnostic ? "diagnostic-member" : ""} ${selected === node.id ? "selected" : ""}`} transform={`translate(${p.x},${p.y})`} onClick={activate} tabIndex={0} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(); } }}>
               <title>{node.path}{node.kind === "directory" ? ` · ${node.members.length} файлов. Нажмите для раскрытия.` : ""}</title><rect width="190" height="60" rx="10" /><Icon x={12} y={20} size={18} /><text x="40" y="25" className="node-label">{node.label.length > 21 ? `${node.label.slice(0, 20)}…` : node.label}</text><text x="40" y="44" className="node-caption">{node.kind === "directory" ? `${node.members.length} файлов` : node.kind === "package" ? "Внешний пакет" : node.language ?? "Ресурс"} · ↓{node.incoming} ↑{node.outgoing}</text>
             </g>;
           })}

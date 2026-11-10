@@ -58,4 +58,33 @@ npm run tauri build
 
 Run `npm test` (Node.js 22.18+ or 24+) for graph projection, aggregation, cycle, navigation, filter, and large/dense graph regressions; `npm run build` checks TypeScript and builds the UI. Engine tests run with `cargo test` in `src-tauri`.
 
+## Version 0.5: evidence-based architecture diagnostics
+
+- Rules run over the full snapshot, independently of graph display limits. Problems separates architectural warnings from analysis coverage and includes info findings, rule/severity/category filters, saved settings, and skipped-rule reasons.
+- Cycles show strongly connected components plus one actual closed route with original import types and source lines. Static and full (including type-only/dynamic) graphs are distinguished. Legacy snapshots show SCC membership without inventing an import sequence.
+- Fan-out and fan-in count unique internal file neighbors, excluding repeated imports, self references, type-only edges and npm packages. Initial advisory thresholds are **more than 20** dependencies and **more than 30** consumers; high fan-in is informational. These defaults are conservative review prompts, not universal quality standards.
+- Files without known consumers are informational candidates, never proven unused code. Declared package entry points, tests, declarations and conventional config files are excluded. The rule is skipped if parsing, source reading or resolution is incomplete. Framework conventions, ignored files and computed imports remain limitations; emitted `dist` entry points are not automatically mapped back to `src`.
+- Rules and effective configuration are saved with each atomic snapshot. Historical diagnostics are not silently recomputed. `js-ts-parser-2` fixes type-only reexports and inline type specifiers; the first new analysis refreshes old parser caches once. Later rule/config changes reuse unchanged AST results.
+
+Optional `dependency.config.json` at the project root (strict JSON, maximum 64 KiB):
+
+```json
+{
+  "rules": {
+    "high-fan-out": { "threshold": 20, "exclude": ["src/generated/**"] },
+    "high-fan-in": { "threshold": 30 },
+    "no-known-consumers": { "exclude": ["src/routes/**", "src/main.tsx"] },
+    "dependency-cycle": { "enabled": true },
+    "resolution": { "enabled": true },
+    "parse-error": { "enabled": true }
+  }
+}
+```
+
+All rules are enabled by default. Unknown fields/rules, invalid patterns and invalid thresholds fail analysis before publishing a snapshot. Exclusions affect findings, not the underlying graph; a cycle is excluded only when every SCC member matches that rule's exclusion. Thresholds apply only to fan-in/out. Disabling coverage diagnostics does not hide coverage gaps from rule eligibility or snapshot metadata.
+
+Diagnostics can open their complete set of nodes in the graph and return to Problems. Long evidence/member lists and result lists load in batches; graph display limits remain explicit. The engine does not execute the inspected project's code or config.
+
+Implementation notes and validation: [0.5 design](docs/version-0.5-design.md), [0.5 checks](docs/version-0.5-validation.md). Optional browser UI checks use Node's built-in WebSocket client and an installed Chromium browser, with real engine JSON and mocked Tauri IPC; see the validation document.
+
 Python, Rust, package lockfile resolution, arbitrary executable bundler aliases, Git comparisons, scan cancellation, and full impact analysis are not implemented yet. Metrics describe the files and edges that this analyzer can verify; they do not imply analysis of unsupported languages.
