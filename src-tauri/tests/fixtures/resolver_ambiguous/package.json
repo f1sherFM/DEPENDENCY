@@ -1,0 +1,5 @@
+{
+  "name": "resolver-ambiguous-fixture",
+  "private": true,
+  "workspaces": ["packages/*"]
+}

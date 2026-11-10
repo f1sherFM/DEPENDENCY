@@ -1,9 +1,10 @@
 export type LanguageCount = { name: string; count: number };
 export type PackageInfo = { name: string; version: string; dependencyType: string; importedBy: number };
+export type ResolutionIssue = { source: string; specifier: string; line: number; status: string; reason: string; attemptedCandidates: string[]; hint: string };
 export type ProjectSummary = {
   name: string; rootPath: string; fileCount: number; sourceFileCount: number; moduleCount: number;
   dependencyCount: number; externalPackageCount: number; cycleCount: number; parseErrorCount: number;
-  unresolvedCount: number; sourceLines: number; languages: LanguageCount[]; packages: PackageInfo[]; cycles: string[][];
+  unresolvedCount: number; ambiguousCount: number; sourceLines: number; languages: LanguageCount[]; packages: PackageInfo[]; cycles: string[][]; resolutionIssues: ResolutionIssue[];
 };
 export type GraphNode = {
   id: string; label: string; path: string; kind: "file" | "package"; language: string | null;

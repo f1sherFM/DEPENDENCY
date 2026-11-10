@@ -1,0 +1,7 @@
+{
+  "name": "resolver-nodenext-fixture",
+  "type": "module",
+  "imports": {
+    "#conditional": { "import": "./src/esm.ts", "require": "./src/cjs.ts" }
+  }
+}

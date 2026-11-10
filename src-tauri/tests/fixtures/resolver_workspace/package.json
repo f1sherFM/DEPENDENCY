@@ -1,0 +1,5 @@
+{
+  "name": "resolver-workspace-fixture",
+  "private": true,
+  "workspaces": ["packages/*"]
+}

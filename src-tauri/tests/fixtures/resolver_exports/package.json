@@ -1,0 +1,10 @@
+{
+  "name": "resolver-exports-fixture",
+  "type": "module",
+  "exports": {
+    ".": { "import": "./src/index.mjs", "require": "./src/index.cjs" },
+    "./feature": "./src/feature.mjs",
+    "./typed": { "types": "./src/typed.d.ts", "import": "./src/typed.mjs", "default": "./src/typed.mjs" }
+  },
+  "imports": { "#internal/*": { "import": "./src/internal/*.mjs", "require": "./src/internal/*.cjs" } }
+}

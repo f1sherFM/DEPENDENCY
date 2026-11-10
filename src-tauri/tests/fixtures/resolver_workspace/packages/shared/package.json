@@ -1,0 +1,7 @@
+{
+  "name": "@demo/shared",
+  "exports": {
+    ".": "./src/index.ts",
+    "./feature": "./src/feature.ts"
+  }
+}

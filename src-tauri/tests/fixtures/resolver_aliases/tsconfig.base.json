@@ -1,0 +1,11 @@
+{
+  // The inherited mapping paths are relative to the config that declares them.
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@shared": ["packages/shared/src/index.ts"],
+      "@models/*": ["packages/models/src/*"]
+    }
+  }
+}

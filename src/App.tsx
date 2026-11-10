@@ -134,7 +134,7 @@ function App() {
         <nav className="main-nav" aria-label="Разделы проекта">
           {navItems.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${view === id ? "active" : ""}`} onClick={() => setView(id)}>
             <Icon size={18} strokeWidth={1.8} /><span>{label}</span>
-            {analysis && <span className="nav-count">{id === "graph" ? analysis.summary.dependencyCount : id === "modules" ? analysis.summary.moduleCount : id === "packages" ? analysis.summary.externalPackageCount : id === "problems" ? analysis.summary.cycleCount + analysis.summary.unresolvedCount + analysis.summary.parseErrorCount : ""}</span>}
+            {analysis && <span className="nav-count">{id === "graph" ? analysis.summary.dependencyCount : id === "modules" ? analysis.summary.moduleCount : id === "packages" ? analysis.summary.externalPackageCount : id === "problems" ? analysis.summary.cycleCount + analysis.summary.unresolvedCount + analysis.summary.ambiguousCount + analysis.summary.parseErrorCount : ""}</span>}
           </button>)}
         </nav>
         <div className="sidebar-caption recent-caption">СОХРАНЁННЫЕ ПРОЕКТЫ</div>
@@ -143,7 +143,7 @@ function App() {
         <div className="sidebar-caption">БЫСТРЫЕ ДЕЙСТВИЯ</div>
         <button className="quick-action" onClick={() => void scan()}><Plus size={17} /> Открыть проект</button>
         <button className="quick-action" disabled={!analysis || busy} onClick={() => analysis && void scan(analysis.summary.rootPath, true)}><RefreshCw size={16} className={busy ? "spin" : ""} /> Пересканировать</button>
-        <div className="sidebar-bottom"><span className="engine-status"><i /> Engine готов</span><span className="version">v0.2.0</span></div>
+        <div className="sidebar-bottom"><span className="engine-status"><i /> Engine готов</span><span className="version">v0.3.0</span></div>
       </aside>
 
       <main className={`main-content ${analysis && view === "graph" && detailsOpen ? "with-details" : "without-details"}`}>
@@ -190,7 +190,7 @@ function Overview({ analysis, onOpenGraph, onSelect }: { analysis: AnalysisResul
     <StatCard icon={Network} label="Внутренние связи" value={summary.dependencyCount} tone="cyan" meta="разрешённые импорты" />
     <StatCard icon={Package} label="Пакеты" value={summary.externalPackageCount} tone="gold" meta={`${summary.packages.length} импортируются в коде`} />
     <StatCard icon={AlertTriangle} label="Циклы" value={summary.cycleCount} tone={summary.cycleCount ? "red" : "green"} meta="сильно связанные компоненты" />
-    <StatCard icon={Unplug} label="Не разрешено" value={summary.unresolvedCount} tone={summary.unresolvedCount ? "amber" : "green"} meta="локальных импортов" />
+    <StatCard icon={Unplug} label="Не разрешено" value={summary.unresolvedCount + summary.ambiguousCount} tone={summary.unresolvedCount || summary.ambiguousCount ? "amber" : "green"} meta="импортов и неоднозначных ссылок" />
   </section>
   <section className="panel graph-preview"><div className="panel-heading"><div><span className="eyebrow">КАРТА ПРОЕКТА</span><h2>Зависимости</h2></div><button className="text-button" onClick={onOpenGraph}>Исследовать граф <ArrowRight size={14} /></button></div>
     <MiniGraph analysis={analysis} onSelect={onSelect} /></section>
@@ -260,9 +260,9 @@ function PackagesView({ analysis }: { analysis: AnalysisResult }) {
 function ProblemsView({ analysis, onSelect }: { analysis: AnalysisResult; onSelect: (id: string) => void }) {
   const { summary } = analysis;
   return <section className="problems-list">{summary.cycles.map((cycle, index) => <article className="problem-card" key={cycle.join("|")}><div className="problem-icon danger"><RefreshCw size={18} /></div><div className="problem-copy"><span className="problem-severity red">ЦИКЛ · {index + 1}</span><b>Циклическая зависимость</b><div className="cycle-path">{cycle.map((id, i) => <span key={id}><button onClick={() => onSelect(id)}>{id}</button>{i < cycle.length - 1 && <ArrowRight size={12} />}</span>)}<ArrowRight size={12} /><button onClick={() => onSelect(cycle[0])}>{cycle[0]}</button></div></div></article>)}
-    {summary.unresolvedCount > 0 && <article className="problem-card"><div className="problem-icon warn"><Unplug size={18} /></div><div className="problem-copy"><span className="problem-severity amber">ТРЕБУЕТ ПРОВЕРКИ</span><b>Не разрешены относительные импорты</b><p>{summary.unresolvedCount} импортов не удалось сопоставить с исходными файлами. Алиасы из tsconfig пока не входят в разрешение путей.</p></div></article>}
+    {summary.resolutionIssues.map((issue) => <article className="problem-card" key={`${issue.source}:${issue.line}:${issue.specifier}`}><div className={`problem-icon ${issue.status === "external" ? "info" : "warn"}`}><Unplug size={18} /></div><div className="problem-copy"><span className={`problem-severity ${issue.status === "external" ? "blue" : "amber"}`}>{issue.status === "external" ? "ВНЕШНЯЯ ССЫЛКА" : issue.status === "ambiguous" ? "НЕОДНОЗНАЧНО" : "НЕ РАЗРЕШЕНО"}</span><b><code>{issue.specifier}</code></b><button className="issue-source" onClick={() => onSelect(issue.source)}>{issue.source}:{issue.line}</button><p>{issue.reason}</p>{issue.attemptedCandidates.length > 0 && <div className="issue-candidates"><small>Проверено / сообщено resolver’ом:</small>{issue.attemptedCandidates.map((candidate) => <code key={candidate}>{candidate}</code>)}</div>}<p className="issue-hint">{issue.hint}</p></div></article>)}
     {summary.parseErrorCount > 0 && <article className="problem-card"><div className="problem-icon warn"><AlertTriangle size={18} /></div><div className="problem-copy"><span className="problem-severity amber">ПОКРЫТИЕ</span><b>Файлы с синтаксическими ошибками</b><p>{summary.parseErrorCount} файлов не прошли полный разбор; дерево AST может содержать частичные результаты.</p></div></article>}
-    {!summary.cycleCount && !summary.unresolvedCount && !summary.parseErrorCount && <div className="all-clear"><div><ShieldCheck size={26} /></div><h2>Критичных проблем анализа нет</h2><p>В текущем снимке не обнаружены циклы, неразрешённые относительные импорты или ошибки разбора.</p></div>}
+    {!summary.cycleCount && !summary.resolutionIssues.length && !summary.parseErrorCount && <div className="all-clear"><div><ShieldCheck size={26} /></div><h2>Критичных проблем анализа нет</h2><p>В текущем снимке не обнаружены циклы, неразрешённые импорты или ошибки разбора.</p></div>}
   </section>;
 }
 

@@ -1,4 +1,5 @@
 mod analysis;
+mod resolver;
 mod storage;
 
 use tauri::{Manager, State};

@@ -39,4 +39,12 @@ npm run tauri build
 - Each snapshot records analyzer and diagnostic-rules versions. Parsed imports are cached per project file by SHA-256 content hash and analyzer version; unchanged file contents reuse cached parser results while file resolution and project-level diagnostics run again.
 - Project source is read and parsed as data only; DEPENDENCY does not execute inspected project files or package scripts.
 
-Python, Rust, package lockfile resolution, TypeScript path aliases, Git comparisons, scan cancellation, and full impact analysis are not implemented yet. Metrics describe the files and edges that this analyzer can verify; they do not imply analysis of unsupported languages.
+## Version 0.3: project-aware module resolution
+
+- The resolver follows `tsconfig.json` and `jsconfig.json` `baseUrl`/`paths`, inherited configuration, JS/TS extension substitution, package `exports`/`imports`, and distinct `import`/`require` conditions.
+- Monorepo workspace packages resolve through installed workspace links or unique `workspaces` declarations, including their export maps. Duplicate workspace names are reported as ambiguous and are not turned into guessed graph edges.
+- Resolution failures include the source location, resolver reason, candidate/config paths when available, and a targeted hint. URL imports are identified separately from unresolved local imports.
+- Resolver and diagnostic rules have their own snapshot version. AST cache version is unchanged, so resolver-only changes reuse stored parse results.
+- Node module resolution is implemented by the MIT-licensed `oxc_resolver` Rust crate. DEPENDENCY reads JSON configuration and package metadata without executing project or bundler configuration code.
+
+Python, Rust, package lockfile resolution, arbitrary executable bundler aliases, Git comparisons, scan cancellation, and full impact analysis are not implemented yet. Metrics describe the files and edges that this analyzer can verify; they do not imply analysis of unsupported languages.
