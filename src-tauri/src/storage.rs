@@ -213,6 +213,27 @@ pub fn load_snapshot(state: &AppState, id: &str) -> Result<ProjectView, String> 
     get_view(&connection, get_project(&connection, &project_id)?, id)
 }
 
+/// Impact queries only read immutable snapshot data, never project paths or last-opened state.
+pub fn read_impact_snapshot(
+    state: &AppState,
+    id: &str,
+) -> Result<(SnapshotRecord, AnalysisResult), String> {
+    let connection = Connection::open_with_flags(
+        &state.database_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| format!("Не удалось прочитать хранилище: {error}"))?;
+    let (snapshot, json) = connection.query_row(
+        "SELECT id,project_id,created_at,analyzer_version,rules_version,parsed_file_count,reused_file_count,CASE WHEN length(CAST(result_json AS BLOB)) <= 67108864 THEN result_json ELSE NULL END FROM snapshots WHERE id=?1",
+        [id], |row| Ok((snapshot_from_row(row)?, row.get::<_, Option<String>>(7)?)),
+    ).optional().map_err(|error| error.to_string())?.ok_or("Снимок не найден".to_string())?;
+    let json =
+        json.ok_or("Снимок превышает лимит чтения Impact Analysis (64 МиБ); данные не усечены")?;
+    let result = serde_json::from_str(&json)
+        .map_err(|error| format!("Не удалось прочитать снимок: {error}"))?;
+    Ok((snapshot, result))
+}
+
 pub fn list_snapshots(state: &AppState, project_id: &str) -> Result<Vec<SnapshotRecord>, String> {
     let connection = connect(state)?;
     let mut statement = connection.prepare("SELECT id,project_id,created_at,analyzer_version,rules_version,parsed_file_count,reused_file_count FROM snapshots WHERE project_id=?1 ORDER BY created_at DESC,id DESC").map_err(|e| e.to_string())?;

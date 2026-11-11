@@ -1,5 +1,6 @@
 mod analysis;
 mod diagnostics;
+mod impact;
 mod resolver;
 mod storage;
 
@@ -88,10 +89,55 @@ async fn load_snapshot(
         .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+async fn get_impact(
+    request: impact::ImpactRequest,
+    state: State<'_, storage::AppState>,
+    impact: State<'_, impact::ImpactState>,
+) -> Result<impact::ImpactSummary, String> {
+    let state = state.inner().clone();
+    let impact = impact.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || impact.get(&state, request))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_impact_page(
+    query_id: String,
+    offset: usize,
+    limit: usize,
+    text: String,
+    tests_only: bool,
+    impact: State<'_, impact::ImpactState>,
+) -> Result<impact::ImpactPage, String> {
+    let impact = impact.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        impact.page(&query_id, offset, limit, &text, tests_only)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_impact_path(
+    query_id: String,
+    node_id: String,
+    offset: usize,
+    limit: usize,
+    impact: State<'_, impact::ImpactState>,
+) -> Result<impact::ImpactPath, String> {
+    let impact = impact.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || impact.path(&query_id, &node_id, offset, limit))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(impact::ImpactState::default())
         .setup(|app| {
             let database_path = app.path().app_data_dir()?.join("dependency.sqlite3");
             let storage = storage::initialize(database_path).map_err(std::io::Error::other)?;
@@ -111,7 +157,10 @@ pub fn run() {
             open_project,
             load_project,
             list_snapshots,
-            load_snapshot
+            load_snapshot,
+            get_impact,
+            get_impact_page,
+            get_impact_path
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");

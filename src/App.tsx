@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { GraphView } from "./GraphView";
 import { ProblemsView } from "./ProblemsView";
+import { ImpactView } from "./ImpactView";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -10,9 +11,9 @@ import {
   Plus, RefreshCw, XCircle, Settings2, Share2, ShieldCheck, Sparkles, Unplug,
 
 } from "lucide-react";
-import type { AnalysisResult, Diagnostic, GraphNode, ProjectRecord, ProjectView, SnapshotRecord } from "./types";
+import type { AnalysisResult, Diagnostic, GraphNode, ImpactGraphScope, ProjectRecord, ProjectView, SnapshotRecord } from "./types";
 
-type View = "overview" | "graph" | "modules" | "packages" | "problems" | "history";
+type View = "overview" | "graph" | "modules" | "packages" | "problems" | "history" | "impact";
 const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "overview", label: "Обзор", icon: LayoutDashboard },
   { id: "graph", label: "Зависимости", icon: Network },
@@ -20,6 +21,7 @@ const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "packages", label: "Пакеты", icon: Package },
   { id: "problems", label: "Проблемы", icon: AlertTriangle },
   { id: "history", label: "Снимки", icon: Clock3 },
+  { id: "impact", label: "Анализ влияния", icon: Share2 },
 ];
 
 function App() {
@@ -28,6 +30,8 @@ function App() {
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [snapshots, setSnapshots] = useState<SnapshotRecord[]>([]);
   const [view, setView] = useState<View>("overview");
+  const [impactRoots, setImpactRoots] = useState<string[]>([]);
+  const [impactScope, setImpactScope] = useState<ImpactGraphScope | null>(null);
   const [graphDiagnostic, setGraphDiagnostic] = useState<Diagnostic | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -51,7 +55,7 @@ function App() {
   }, [currentProject?.project.id, currentProject?.snapshot.id]);
 
   const showProject = (project: ProjectView) => {
-    setCurrentProject(project); setAnalysis(project.result); setGraphDiagnostic(null); setSelected(null); setView("overview");
+    setCurrentProject(project); setAnalysis(project.result); setGraphDiagnostic(null); setImpactScope(null); setImpactRoots([]); setSelected(null); setView("overview");
     void refreshProjects().catch(() => {});
   };
 
@@ -99,7 +103,8 @@ function App() {
     finally { setBusy(false); }
   };
 
-  const selectNode = (id: string) => { setSelected(id); if (!graphDiagnostic?.nodeIds.includes(id)) setGraphDiagnostic(null); };
+  const selectNode = (id: string) => { setSelected(id); if (!graphDiagnostic?.nodeIds.includes(id)) setGraphDiagnostic(null); if (!impactScope?.nodeIds.includes(id)) setImpactScope(null); };
+  const openImpact = (id: string) => { setImpactRoots([id]); setImpactScope(null); setGraphDiagnostic(null); setView("impact"); };
   const selectedNode = analysis?.nodes.find((node) => node.id === selected) ?? null;
 
   return (
@@ -138,31 +143,32 @@ function App() {
         <div className="sidebar-caption">БЫСТРЫЕ ДЕЙСТВИЯ</div>
         <button className="quick-action" onClick={() => void scan()}><Plus size={17} /> Открыть проект</button>
         <button className="quick-action" disabled={!analysis || busy} onClick={() => analysis && void scan(analysis.summary.rootPath, true)}><RefreshCw size={16} className={busy ? "spin" : ""} /> Пересканировать</button>
-        <div className="sidebar-bottom"><span className="engine-status"><i /> Engine готов</span><span className="version">v0.5.0</span></div>
+        <div className="sidebar-bottom"><span className="engine-status"><i /> Engine готов</span><span className="version">v0.6.0</span></div>
       </aside>
 
       <main className={`main-content ${analysis && view === "graph" && detailsOpen ? "with-details" : "without-details"}`}>
         {!analysis ? <Welcome busy={busy} error={error} onOpen={() => void scan()} /> : <>
           <div className="page-heading">
             <div><div className="eyebrow"><span className="crumb">{analysis.summary.name}</span><ArrowRight size={12} /><span>{navItems.find((item) => item.id === view)?.label}</span></div>
-              <h1>{view === "overview" ? "Обзор проекта" : view === "graph" ? "Граф зависимостей" : view === "modules" ? "Модули проекта" : view === "packages" ? "Внешние пакеты" : view === "history" ? "История снимков" : "Проблемы анализа"}</h1>
+              <h1>{view === "overview" ? "Обзор проекта" : view === "graph" ? "Граф зависимостей" : view === "modules" ? "Модули проекта" : view === "packages" ? "Внешние пакеты" : view === "history" ? "История снимков" : view === "impact" ? "Анализ влияния" : "Проблемы анализа"}</h1>
               <p className="subheading">{view === "overview" ? "Структура и связи, обнаруженные в выбранном репозитории." : `${analysis.summary.rootPath}`}</p>
             </div>
             <button className="primary-button" disabled={busy} onClick={() => void scan(analysis.summary.rootPath, true)}>{busy ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{busy ? "Анализируем…" : "Запустить анализ"}</button>
           </div>
           {error && <div className="error-banner"><AlertTriangle size={16} />{error}<button onClick={() => setError(null)}><XCircle size={15} /></button></div>}
           {view === "overview" && <Overview analysis={analysis} onOpenGraph={() => setView("graph")} onSelect={setSelected} />}
-          {view === "graph" && <GraphView key={currentProject?.snapshot.id} analysis={analysis} selected={selected} onSelect={selectNode} searchInput={graphSearch} detailsOpen={detailsOpen} setDetailsOpen={setDetailsOpen} diagnostic={graphDiagnostic} onClearDiagnostic={() => setGraphDiagnostic(null)} onOpenDiagnostic={() => setView("problems")} />}
+          {view === "graph" && <GraphView key={currentProject?.snapshot.id} analysis={analysis} selected={selected} onSelect={selectNode} searchInput={graphSearch} detailsOpen={detailsOpen} setDetailsOpen={setDetailsOpen} diagnostic={graphDiagnostic} onClearDiagnostic={() => { setGraphDiagnostic(null); setImpactScope(null); }} impactScope={impactScope} onOpenImpact={() => setView("impact")} onOpenDiagnostic={() => setView("problems")} />}
           {view === "modules" && <ModulesView analysis={analysis} onSelect={(id) => { selectNode(id); setView("graph"); }} />}
           {view === "packages" && <PackagesView analysis={analysis} />}
-          {view === "problems" && <ProblemsView key={currentProject?.snapshot.id} activeDiagnosticId={graphDiagnostic?.id} analysis={analysis} onShowGraph={(diagnostic) => { setGraphDiagnostic(diagnostic); setSelected(null); setView("graph"); }} onSelect={(id) => { selectNode(id); setView("graph"); }} />}
+          {view === "problems" && <ProblemsView key={currentProject?.snapshot.id} activeDiagnosticId={graphDiagnostic?.id} analysis={analysis} onShowGraph={(diagnostic) => { setImpactScope(null); setGraphDiagnostic(diagnostic); setSelected(null); setView("graph"); }} onSelect={(id) => { selectNode(id); setView("graph"); }} />}
           {view === "history" && <HistoryView snapshots={snapshots} current={currentProject?.snapshot.id ?? ""} onOpen={openSnapshot} />}
+          {currentProject && <div hidden={view !== "impact"}><ImpactView key={currentProject.snapshot.id} analysis={analysis} snapshot={currentProject.snapshot} initialRoots={impactRoots} onGraph={(scope) => { setImpactScope(scope); setGraphDiagnostic(null); setSelected(null); setView("graph"); }} /></div>}
           <div className="status-line"><span><ShieldCheck size={13} /> Исходный код не запускается</span><span><Clock3 size={13} /> Снимок {formatDate(currentProject?.snapshot.createdAt ?? 0)} · анализатор {currentProject?.snapshot.analyzerVersion ?? "—"}</span></div>
         </>}
       </main>
 
       {analysis && view === "graph" && detailsOpen && <aside className="details-panel"><div className="details-head"><div><span className="sidebar-caption">КОНТЕКСТ</span><h3>{selectedNode ? "Выбранный узел" : "Сводка проекта"}</h3></div><button className="icon-button" onClick={() => setDetailsOpen(false)} aria-label="Скрыть панель"><PanelRightClose size={17} /></button></div>
-        {selectedNode ? <NodeDetails key={selectedNode.id} node={selectedNode} analysis={analysis} onSelect={selectNode} /> : <>
+        {selectedNode ? <NodeDetails key={selectedNode.id} node={selectedNode} analysis={analysis} onSelect={selectNode} onImpact={openImpact} /> : <>
           <div className="detail-empty"><div className="detail-empty-icon"><CircleDot size={20} /></div><b>Выберите узел графа</b><span>Здесь появятся сведения о связях, языке и размере модуля.</span></div>
           <div className="detail-section"><div className="detail-section-title">СОСТАВ ГРАФА</div><DetailMetric label="Исходные файлы" value={analysis.summary.sourceFileCount} /><DetailMetric label="Внутренние связи" value={analysis.summary.dependencyCount} /><DetailMetric label="Внешние пакеты" value={analysis.summary.packages.length} /></div>
           <div className="detail-section"><div className="detail-section-title">ЯЗЫКИ</div>{analysis.summary.languages.map((language) => <div className="language-row" key={language.name}><span><i className="language-dot" />{language.name}</span><b>{language.count}</b></div>)}</div>
@@ -208,12 +214,13 @@ function MiniGraph({ analysis, onSelect }: { analysis: AnalysisResult; onSelect:
   </svg>{analysis.nodes.filter((n) => n.kind === "file").length > 36 && <div className="graph-overflow">Показаны первые 36 узлов предпросмотра. Откройте полный граф для всей выборки.</div>}</div>;
 }
 
-function NodeDetails({ node, analysis, onSelect }: { node: GraphNode; analysis: AnalysisResult; onSelect: (id: string) => void }) {
+function NodeDetails({ node, analysis, onSelect, onImpact }: { node: GraphNode; analysis: AnalysisResult; onSelect: (id: string) => void; onImpact: (id: string) => void }) {
   const [relationLimit, setRelationLimit] = useState(50);
   const inbound = analysis.edges.filter((e) => e.target === node.id); const outbound = analysis.edges.filter((e) => e.source === node.id);
   const resolve = (id: string) => analysis.nodes.find((n) => n.id === id)?.path ?? id;
   const NodeIcon = node.kind === "package" ? Package : FileCode2;
   return <div className="node-details"><div className={`node-detail-icon ${node.kind}`}><NodeIcon size={20} /></div><h2>{node.label}</h2><div className="node-detail-path">{node.path}</div><div className="node-tags"><span>{node.kind === "package" ? "ВНЕШНИЙ ПАКЕТ" : node.language?.toUpperCase() ?? "РЕСУРС"}</span>{node.kind === "package" && <span>{node.declared ? "ОБЪЯВЛЕН" : "НЕ ОБЪЯВЛЕН"}</span>}</div>
+    {node.kind === "file" && <button className="text-button impact-action" onClick={() => onImpact(node.id)}><Share2 size={14} />Анализ влияния</button>}
     <div className="detail-section"><div className="detail-section-title">МЕТРИКИ</div><DetailMetric label="Строки кода" value={node.lines || "—"} /><DetailMetric label="Входящие" value={node.incoming} /><DetailMetric label="Исходящие" value={node.outgoing} /></div>
     <div className="detail-section"><div className="detail-section-title">ИМПОРТИРУЕТ · {outbound.length}</div>{outbound.length ? outbound.slice(0, relationLimit).map((edge) => <button className="relation-row relation-link" key={edge.id} onClick={() => onSelect(edge.target)}><ArrowRight size={13} /><span>{resolve(edge.target)}</span><small>{edge.kind === "type_only_import" ? "type" : edge.kind}</small></button>) : <EmptyRow text="Нет обнаруженных исходящих связей." />}</div>
     <div className="detail-section"><div className="detail-section-title">ИСПОЛЬЗУЕТСЯ В · {inbound.length}</div>{inbound.length ? inbound.slice(0, relationLimit).map((edge) => <button className="relation-row relation-link" key={edge.id} onClick={() => onSelect(edge.source)}><ArrowLeft size={13} /><span>{resolve(edge.source)}</span><small>:{edge.line}</small></button>) : <EmptyRow text="Входящие импорты не найдены." />}</div>

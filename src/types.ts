@@ -32,3 +32,19 @@ export type AnalysisResult = { summary: ProjectSummary; nodes: GraphNode[]; edge
 export type ProjectRecord = { id: string; name: string; rootPath: string; lastOpenedAt: number; latestSnapshotId: string | null; latestSnapshotAt: number | null };
 export type SnapshotRecord = { id: string; projectId: string; createdAt: number; analyzerVersion: string; rulesVersion: string; parsedFileCount: number; reusedFileCount: number };
 export type ProjectView = { project: ProjectRecord; snapshot: SnapshotRecord; result: AnalysisResult };
+export type ImpactRequest = { snapshotId: string; roots: string[]; edgeKinds: string[]; maxDepth: number | null };
+export type ImpactRow = { nodeId: string; path: string; distance: number; viaRootId: string; isTestCandidate: boolean; hasRecordedCycleDiagnostic: boolean };
+export type ImpactPage = { items: ImpactRow[]; offset: number; nextOffset: number | null; knownMatchingCount: number; status: "complete" | "partial" };
+export type ImpactPath = { edges: GraphEdge[]; offset: number; nextOffset: number | null; totalEdgeCount: number; reachesRoot: boolean };
+export type ImpactSummary = {
+  queryId: string; snapshotId: string; impactVersion: string; analyzerVersion: string; rulesVersion: string;
+  roots: string[]; effectiveEdgeKinds: string[]; maxDepth: number | null; status: "complete" | "partial"; partialReasons: string[];
+  knownAffectedCount: number; knownDirectCount: number; knownTransitiveCount: number; knownTestCandidateCount: number; maxKnownDistance: number;
+  coverage: { state: "known-gaps" | "no-recorded-gaps" | "legacy-unknown"; reasons: string[] };
+  visitedNodeCount: number; examinedEdgeCount: number; elapsedMs: number; readMs: number; indexMs: number; estimatedIndexBytes: number;
+  budgets: { maxNodes: number; maxEdges: number; maxMillis: number }; firstPage: ImpactPage;
+};
+export type ImpactGraphScope = {
+  queryId: string; title: string; roots: string[]; nodeIds: string[]; edges?: GraphEdge[]; edgeKinds: string[];
+  knownAffectedCount: number; shownAffectedCount: number; partial: boolean;
+};

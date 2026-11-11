@@ -93,3 +93,11 @@ test('diagnostic scope includes the whole SCC and retains its internal edges', (
   assert.equal(result.boundaryEdges, 1);
   assert.ok(!result.nodes.some(n => n.id === 'outside'));
 });
+
+test('impact roots remain visible when the displayed page hits the graph limit', () => {
+  const nodes = [node('root'), ...Array.from({ length: 230 }, (_, i) => node(`consumer-${i}`))];
+  const edges = nodes.slice(1).map(n => edge(n.id, 'root'));
+  const result = projectGraph(nodes, edges, { ...options, mode: 'files', nodeIds: nodes.map(n => n.id), priorityIds: ['root'] });
+  assert.equal(result.nodes[0].id, 'root'); assert.equal(result.nodes.length, 200);
+  assert.equal(result.hiddenNodes, 31); assert.equal(result.hiddenEdges, 31);
+});

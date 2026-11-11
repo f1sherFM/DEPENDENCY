@@ -87,4 +87,16 @@ Diagnostics can open their complete set of nodes in the graph and return to Prob
 
 Implementation notes and validation: [0.5 design](docs/version-0.5-design.md), [0.5 checks](docs/version-0.5-validation.md). Optional browser UI checks use Node's built-in WebSocket client and an installed Chromium browser, with real engine JSON and mocked Tauri IPC; see the validation document.
 
-Python, Rust, package lockfile resolution, arbitrary executable bundler aliases, Git comparisons, scan cancellation, and full impact analysis are not implemented yet. Metrics describe the files and edges that this analyzer can verify; they do not imply analysis of unsupported languages.
+## Version 0.6: file impact analysis
+
+- Select a local file or resource in the graph and choose **Анализ влияния**, or open that section and search for up to 32 seed files. Impact runs over the full saved snapshot, including historical snapshots whose project folder no longer exists. It never rescans or executes inspected code.
+- Reverse breadth-first search finds direct and transitive consumers. Each result has a minimum distance and one deterministic shortest chain in the original import direction: consumer → dependency → seed. Seeds are excluded from affected counts, including when cycles return to them.
+- Choose all known local import kinds, static imports, individual kinds, or a maximum depth. Search and test-candidate filters only affect the result list. File names identify potential tests; this does not establish which tests are sufficient or executable.
+- Pages and proof segments contain at most 200 items. Open a page or proof segment in the graph, with seed files highlighted separately. Counts for computed results and hidden drawing elements remain distinct.
+- Work budgets: 100,000 visited nodes, 1,000,000 inspected local edges and 2 seconds of traversal. Depth/work limits produce an explicit partial result with lower-bound counts. Reading/indexing and sorting are measured separately from the traversal deadline; these are not full-request latency guarantees.
+- One snapshot index and one query result are cached in memory. Repeating identical parameters reuses the result; replacing it expires old query IDs. Cache data is derived from SQLite and does not modify snapshots, AST caches or rule results. Parser/rules/schema versions are unchanged from 0.5.
+- Snapshot JSON reading is bounded to 64 MiB and the index to a conservative 256 MiB estimate; oversized data returns an explicit error rather than a silently truncated graph. These limits do not cap total process memory.
+
+Coverage gaps and legacy analyzer versions are visible. A reachable consumer **may** be affected; file reachability cannot predict whether a particular export change breaks it. Package seeds, symbol-level impact, Git diff and execution of tests are outside 0.6. Implementation and reproducible checks: [design](docs/version-0.6-design.md), [validation](docs/version-0.6-validation.md).
+
+Python, Rust, package lockfile resolution, arbitrary executable bundler aliases, Git comparisons, scan cancellation, and symbol-level impact analysis are not implemented yet. Metrics describe the files and edges that this analyzer can verify; they do not imply analysis of unsupported languages.

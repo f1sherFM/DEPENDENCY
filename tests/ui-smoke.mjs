@@ -9,7 +9,8 @@ import { resolve, extname, join } from 'node:path';
 
 const [fixturePath, browserPath, outputPath] = process.argv.slice(2);
 assert.ok(fixturePath && browserPath, 'Pass an engine JSON dump and a Chromium executable');
-const analysis = JSON.parse(await readFile(fixturePath, 'utf8'));
+const fixture = JSON.parse(await readFile(fixturePath, 'utf8'));
+const analysis = fixture.analysis ?? fixture;
 const output = outputPath || await mkdtemp(join(tmpdir(), 'dependency-ui-'));
 const profile = await mkdtemp(join(tmpdir(), 'dependency-browser-'));
 const server = createServer(async (request, response) => {
@@ -66,11 +67,33 @@ try {
   const bridge = result => `(() => {
     const result = ${JSON.stringify(result)};
     const project = { id: 'test-project', name: result.summary.name, rootPath: result.summary.rootPath, lastOpenedAt: 0, latestSnapshotId: 'snapshot', latestSnapshotAt: 0 };
-    const snapshot = { id: 'snapshot', projectId: project.id, createdAt: 0, analyzerVersion: 'test-dump', rulesVersion: result.rulesRun?.version ?? 'legacy', parsedFileCount: 0, reusedFileCount: 0 };
-    window.__TAURI_INTERNALS__ = { invoke: async cmd => {
+    const snapshot = ${JSON.stringify(fixture.snapshot ?? null)} ?? { id: 'snapshot', projectId: project.id, createdAt: 0, analyzerVersion: 'test-dump', rulesVersion: result.rulesRun?.version ?? 'legacy', parsedFileCount: 0, reusedFileCount: 0 };
+    const impactCases = ${JSON.stringify(fixture.cases ?? [])};
+    const key = request => JSON.stringify([request.roots.slice().sort(),request.edgeKinds.slice().sort(),request.maxDepth]);
+    window.__impactCalls = [];
+    window.__TAURI_INTERNALS__ = { invoke: async (cmd, args) => {
       if (cmd === 'list_projects') return [project];
       if (cmd === 'list_snapshots') return [snapshot];
       if (cmd === 'load_project' || cmd === 'load_snapshot') return { project, snapshot, result };
+      if (cmd === 'get_impact') {
+        window.__impactCalls.push(args.request);
+        const item = impactCases.find(item => key(item.request) === key(args.request));
+        if (!item) throw new Error('No engine-exported impact case: ' + key(args.request));
+        const delay=window.__delayNextImpact || 0; window.__delayNextImpact=0;
+        if (delay) await new Promise(done=>setTimeout(done,delay));
+        return item.summary;
+      }
+      if (cmd === 'get_impact_page') {
+        const item = impactCases.find(item => item.summary.queryId === args.queryId);
+        if (!item || window.__expireImpact) throw new Error('Результат Impact Analysis истёк. Повторите запрос');
+        const rows = item.page.items.filter(row => (!args.testsOnly || row.isTestCandidate) && row.path.toLowerCase().includes(args.text.trim().toLowerCase()));
+        return { ...item.page, items: rows.slice(args.offset,args.offset+args.limit), offset: args.offset, knownMatchingCount: rows.length, nextOffset: args.offset+args.limit<rows.length ? args.offset+args.limit : null };
+      }
+      if (cmd === 'get_impact_path') {
+        const item = impactCases.find(item => item.summary.queryId === args.queryId);
+        if (!item || window.__expireImpact) throw new Error('Результат Impact Analysis истёк. Повторите запрос');
+        return item.paths[args.nodeId];
+      }
       throw new Error('Unexpected IPC: ' + cmd);
     }};
   })();`;
@@ -99,6 +122,54 @@ try {
   await wait(`Array.from(document.querySelectorAll('.graph-navigation button')).some(button=>button.textContent==='Выше')`);
   const graphShot = await send('Page.captureScreenshot', { format: 'png' });
   await writeFile(join(output, 'graph.png'), Buffer.from(graphShot.data, 'base64'));
+  if (fixture.cases) {
+    await evaluate(`document.querySelectorAll('.main-nav button')[6].click()`);
+    await wait(`document.querySelector('.impact-controls')`);
+    await evaluate(`(() => { const input=document.querySelector('[aria-label="Найти исходный файл"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'target.ts'); input.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+    await wait(`document.querySelector('.impact-choices button')?.textContent === 'src/target.ts'`);
+    await evaluate(`document.querySelector('.impact-choices button').click()`);
+    await wait(`document.querySelectorAll('.impact-table tbody tr').length === 7`);
+    await evaluate(`document.querySelector('.impact-list-tools input[type=checkbox]').click()`);
+    await wait(`document.querySelectorAll('.impact-table tbody tr').length === 1`);
+    assert.ok(await evaluate(`document.querySelector('.impact-table').textContent.includes('unit.spec.ts')`));
+    await evaluate(`window.__expireImpact=true; document.querySelector('.impact-table .text-button').click()`);
+    await wait(`document.querySelector('.impact-view [role=alert]')?.textContent.includes('истёк')`);
+    await evaluate(`window.__expireImpact=false; document.querySelector('.impact-view [role=alert] button').click()`);
+    await wait(`document.querySelectorAll('.impact-table tbody tr').length === 1 && !document.querySelector('.impact-view [role=alert]')`);
+    await evaluate(`document.querySelector('.impact-table .text-button').click()`);
+    await wait(`document.querySelectorAll('.impact-proof li').length === 3`);
+    assert.ok(await evaluate(`document.querySelector('.impact-proof li:last-child').textContent.includes('src/target.ts')`));
+    const impactShot=await send('Page.captureScreenshot',{format:'png'}); await writeFile(join(output,'impact.png'),Buffer.from(impactShot.data,'base64'));
+    await evaluate(`Array.from(document.querySelectorAll('.impact-proof button')).find(button=>button.textContent==='Показать сегмент в графе').click()`);
+    await wait(`document.querySelectorAll('.graph-node.impact-root').length === 1`);
+    assert.equal(await evaluate(`document.querySelectorAll('.graph-edge').length`),3);
+    await evaluate(`Array.from(document.querySelectorAll('.graph-navigation button')).find(button=>button.textContent==='К анализу влияния').click()`);
+    await evaluate(`window.__delayNextImpact=1500; Array.from(document.querySelectorAll('.impact-options button')).find(button=>button.textContent==='Статические').click()`);
+    await wait(`window.__impactCalls.at(-1).edgeKinds.length === 3`);
+    await evaluate(`Array.from(document.querySelectorAll('.impact-options button')).find(button=>button.textContent==='Все импорты').click()`);
+    await wait(`document.querySelector('.impact-summary')?.textContent.includes('Потребителей: 7')`);
+    await evaluate(`new Promise(done=>setTimeout(done,1600))`);
+    assert.ok(await evaluate(`document.querySelector('.impact-summary').textContent.includes('Потребителей: 7')`));
+    await evaluate(`document.querySelector('.impact-list-tools input[type=checkbox]').click(); Array.from(document.querySelectorAll('.impact-options button')).find(button=>button.textContent==='Статические').click()`);
+    await wait(`document.querySelectorAll('.impact-table tbody tr').length === 5`);
+    await evaluate(`(() => { Array.from(document.querySelectorAll('.impact-options button')).find(button=>button.textContent==='Все импорты').click(); const select=document.querySelector('[aria-label="Глубина влияния"]'); select.value='1'; select.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+    await wait(`document.querySelector('.impact-summary')?.textContent.includes('Частичный обход')`);
+    assert.ok(await evaluate(`document.querySelector('.impact-summary').textContent.includes('не менее')`));
+    await evaluate(`(() => { const select=document.querySelector('[aria-label="Глубина влияния"]'); select.value=''; select.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+    await wait(`document.querySelectorAll('.impact-table tbody tr').length === 7`);
+    await evaluate(`(() => { const input=document.querySelector('[aria-label="Найти исходный файл"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'app.ts'); input.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+    await wait(`document.querySelector('.impact-choices button')?.textContent === 'src/app.ts'`);
+    await evaluate(`document.querySelector('.impact-choices button').click()`);
+    await wait(`document.querySelectorAll('.impact-table tbody tr').length === 6`);
+    await evaluate(`document.querySelectorAll('.main-nav button')[1].click()`);
+    await wait(`document.querySelector('[aria-label="Выбрать src/unit.spec.ts"]')`);
+    await evaluate(`document.querySelector('[aria-label="Выбрать src/unit.spec.ts"]').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
+    await wait(`document.querySelector('.impact-action')`);
+    await evaluate(`document.querySelector('.impact-action').click()`);
+    await wait(`document.querySelector('.impact-empty')?.textContent.includes('не найдены потребители')`);
+    assert.ok(await evaluate(`document.querySelector('.impact-empty').textContent.includes('не означает')`));
+    console.log('PASS: real Rust impact responses, type filters, partial counts, test path, graph roots, multi-root union, file-context action and empty result');
+  }
   const large = structuredClone(analysis);
   large.diagnostics = Array.from({ length: 125 }, (_, index) => ({ ...analysis.diagnostics[0], id: `large-${index}` }));
   await send('Page.addScriptToEvaluateOnNewDocument', { source: bridge(large) });

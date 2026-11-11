@@ -7,6 +7,7 @@ export type GraphOptions = {
   edgeKind: string; focus: string | null; direction: "both" | "incoming" | "outgoing";
   limit: number;
   nodeIds?: readonly string[] | null;
+  priorityIds?: readonly string[];
 };
 
 // A view of a snapshot: aggregation and filtering never mutate analysis data.
@@ -29,6 +30,7 @@ export function projectGraph(nodes: GraphNode[], edges: GraphEdge[], options: Gr
   const membership = new Map<string, string>();
   const prefix = options.directory ? `${options.directory}/` : "";
   const scope = options.nodeIds ? new Set(options.nodeIds) : null;
+  const priority = new Set(options.priorityIds ?? []);
   for (const node of eligible) {
     if (scope && !scope.has(node.id)) continue;
     if (focusIds && !focusIds.has(node.id)) continue;
@@ -63,6 +65,8 @@ export function projectGraph(nodes: GraphNode[], edges: GraphEdge[], options: Gr
     displayed.get(target)!.incoming++;
   }
   const allNodes = [...displayed.values()].sort((a, b) =>
+    Number(b.members.some(id => priority.has(id))) - Number(a.members.some(id => priority.has(id)))
+    ||
     Number(b.members.includes(options.focus ?? "")) - Number(a.members.includes(options.focus ?? ""))
     || (b.incoming + b.outgoing) - (a.incoming + a.outgoing) || a.path.localeCompare(b.path));
   const visibleNodes = allNodes.slice(0, options.limit);
