@@ -1,0 +1,29 @@
+name: Ошибка
+description: Неверный анализ, ошибка UI или сбой приложения
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Версия / commit
+      placeholder: 0.8.0 или commit SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Окружение и запуск
+      description: Windows, установщик или исходники; для анализа — язык и тип проекта.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Как воспроизвести
+      description: Шаги, ожидаемый результат и фактическое поведение. Для связи — минимальный импорт и конфигурация.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Сообщения и контекст
+      description: Укажи вид снимка/профиль/coverage, если важно. Не прикладывай SQLite, .env, токены и закрытые исходники.
