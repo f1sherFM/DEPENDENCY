@@ -11,7 +11,7 @@ use uuid::Uuid;
 // Keep these independent of the app release: bump only when parser output or
 // diagnostic semantics change, so UI and storage changes do not invalidate AST cache.
 pub const ANALYZER_VERSION: &str = "js-ts-parser-2";
-pub const RULES_VERSION: &str = "diagnostics-3+resolver-3";
+pub const RULES_VERSION: &str = "diagnostics-4+resolver-4";
 
 #[derive(Clone)]
 pub struct AppState {
@@ -284,12 +284,18 @@ pub fn load_cache(
     };
     let connection = connect(state)?;
     let mut statement = connection
-        .prepare("SELECT cache_json FROM parsed_files WHERE project_id=?1 AND analyzer_version=?2")
+        .prepare("SELECT cache_json FROM parsed_files WHERE project_id=?1 AND analyzer_version IN (?2,?3,?4)")
         .map_err(|e| e.to_string())?;
     let rows = statement
-        .query_map(params![project_id, ANALYZER_VERSION], |row| {
-            row.get::<_, String>(0)
-        })
+        .query_map(
+            params![
+                project_id,
+                crate::language::CACHE_VERSIONS[0],
+                crate::language::CACHE_VERSIONS[1],
+                crate::language::CACHE_VERSIONS[2]
+            ],
+            |row| row.get::<_, String>(0),
+        )
         .map_err(|e| e.to_string())?;
     rows.map(|json| {
         let json = json.map_err(|e| e.to_string())?;
@@ -358,7 +364,7 @@ pub fn save_captured_snapshot(
     }
     for file in &cache {
         let cache_json = serde_json::to_string(file).map_err(|e| e.to_string())?;
-        transaction.execute("INSERT INTO parsed_files(project_id,relative_path,content_hash,analyzer_version,cache_json) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(project_id,relative_path) DO UPDATE SET content_hash=excluded.content_hash,analyzer_version=excluded.analyzer_version,cache_json=excluded.cache_json", params![project_id, file.relative_path, file.content_hash, ANALYZER_VERSION, cache_json]).map_err(|e| format!("Не удалось обновить кэш разбора: {e}"))?;
+        transaction.execute("INSERT INTO parsed_files(project_id,relative_path,content_hash,analyzer_version,cache_json) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(project_id,relative_path) DO UPDATE SET content_hash=excluded.content_hash,analyzer_version=excluded.analyzer_version,cache_json=excluded.cache_json", params![project_id, file.relative_path, file.content_hash, file.analyzer_version, cache_json]).map_err(|e| format!("Не удалось обновить кэш разбора: {e}"))?;
     }
     if result
         .basis

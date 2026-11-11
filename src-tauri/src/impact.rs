@@ -12,12 +12,16 @@ use std::{
 use uuid::Uuid;
 
 pub const VERSION: &str = "file-impact-1";
-pub const EDGE_KINDS: [&str; 5] = [
+pub const EDGE_KINDS: [&str; 9] = [
     "import",
     "reexport",
     "commonjs_import",
     "type_only_import",
     "dynamic_import",
+    "python_import",
+    "rust_import",
+    "conditional_import",
+    "module_declaration",
 ];
 const MAX_INDEX_BYTES: usize = 256 * 1024 * 1024;
 
@@ -184,6 +188,9 @@ impl Index {
             });
         }
         let mut reasons = vec!["Достижимость в файловом графе не доказывает поломку конкретного изменения. Вычисляемые пути, ignore-правила и неподдерживаемые языки ограничивают покрытие.".into()];
+        if let Some(profile) = &result.analysis_profile {
+            reasons.extend(profile.limitations.clone());
+        }
         let state = if let Some(run) = &result.rules_run {
             if run.coverage_issue_count > 0 {
                 reasons.push(format!(
@@ -675,6 +682,7 @@ mod tests {
     fn result(names: &[&str], edges: Vec<GraphEdge>) -> AnalysisResult {
         AnalysisResult {
             basis: None,
+            analysis_profile: None,
             summary: ProjectSummary {
                 name: "test".into(),
                 root_path: "missing".into(),
@@ -1112,6 +1120,7 @@ mod tests {
             (vec!["src/style.css"], false, None),
         ] {
             let mut req = request(&roots);
+            req.edge_kinds = EDGE_KINDS[..5].iter().map(|kind| (*kind).into()).collect();
             req.snapshot_id = view.snapshot.id.clone();
             req.max_depth = depth;
             if static_only {

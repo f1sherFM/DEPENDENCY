@@ -787,6 +787,26 @@ fn export_git_ui_and_check_local_oracle() {
         );
         paths.push(relative);
     }
+    if let Ok(extra) = std::env::var("DEPENDENCY_MIXED_FIXTURE") {
+        for entry in walkdir::WalkDir::new(&extra)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+        {
+            let relative = entry
+                .path()
+                .strip_prefix(&extra)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            write(
+                root.path(),
+                &relative,
+                &fs::read_to_string(entry.path()).unwrap(),
+            );
+            paths.push(relative);
+        }
+    }
     let refs: Vec<_> = paths.iter().map(String::as_str).collect();
     let first = commit(&repo, &refs);
     write(root.path(), "src/main.ts", "import './shared';\n");

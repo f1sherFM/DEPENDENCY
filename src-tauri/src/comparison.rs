@@ -101,8 +101,11 @@ impl Comparisons {
             });
         let compatible = profiles
             && base_meta.analyzer_version == target_meta.analyzer_version
-            && base_meta.rules_version.split('+').next_back()
-                == target_meta.rules_version.split('+').next_back();
+            && match (&base.analysis_profile, &target.analysis_profile) {
+                (Some(a), Some(b)) => a == b,
+                (None, None) => base_meta.rules_version == target_meta.rules_version,
+                _ => false,
+            };
         let diagnostics_comparable = compatible
             && base_meta.rules_version == target_meta.rules_version
             && base
@@ -540,7 +543,9 @@ fn edge_changes(
                 .imports
                 .iter()
                 .filter(|import| {
-                    import.line == edge.line && (edge.kind == "package" || edge.kind == import.kind)
+                    import.facts.is_none()
+                        && import.line == edge.line
+                        && (edge.kind == "package" || edge.kind == import.kind)
                 })
                 .collect();
             if requests.len() == 1

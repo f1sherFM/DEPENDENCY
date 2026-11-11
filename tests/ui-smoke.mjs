@@ -29,8 +29,9 @@ let socket;
 try {
   let debugging = '';
   const endpoint = await new Promise((done, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Chromium debugging endpoint timeout')), 15000);
+    const timeout = setTimeout(() => reject(new Error('Chromium debugging endpoint timeout: '+debugging.slice(-3000))), 15000);
     child.on('error', reject);
+    child.once('exit', (code,signal)=>{clearTimeout(timeout);reject(new Error('Chromium exited before debugging: '+code+' '+signal+' '+debugging.slice(-3000)));});
     child.stderr.on('data', chunk => {
       debugging += chunk;
       const match = debugging.match(/DevTools listening on (ws:\/\/[^\s]+)/);
@@ -116,6 +117,7 @@ try {
   await send('Page.addScriptToEvaluateOnNewDocument', { source: bridge(analysis) });
   await send('Page.navigate', { url: origin });
   await wait(`document.querySelector('.main-nav') && document.querySelector('.stat-card')`);
+  if(analysis.analysisProfile){await wait(`document.querySelector('.analysis-profile')`);for(const language of Object.keys(analysis.analysisProfile.analyzers)){assert.ok(await evaluate(`document.querySelector('.analysis-profile').textContent.includes(${JSON.stringify(language)})`));}}
   await evaluate(`document.querySelectorAll('.main-nav button')[4].click()`);
   await wait(`document.querySelector('.diagnostics-coverage') && document.querySelector('.diagnostic-card')`);
   assert.ok(await evaluate(`document.querySelector('.diagnostics-coverage').textContent.includes('Архитектурных предупреждений')`));

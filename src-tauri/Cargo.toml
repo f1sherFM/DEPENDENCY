@@ -1,6 +1,6 @@
 [package]
 name = "dependency"
-version = "0.7.0"
+version = "0.8.0"
 description = "Local software architecture and dependency analyzer"
 authors = ["f1sherFM"]
 license = "MIT"
@@ -37,3 +37,6 @@ globset = "0.4"
 json-strip-comments = "1.0"
 git2 = { version = "0.21", default-features = false }
 tempfile = "3"
+tree-sitter-python = "0.25"
+tree-sitter-rust = "0.24"
+toml = "0.8"

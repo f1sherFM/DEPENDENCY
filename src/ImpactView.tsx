@@ -3,13 +3,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { ArrowRight, Network, RefreshCw, X } from "lucide-react";
 import type { AnalysisResult, ImpactGraphScope, ImpactPage, ImpactPath, ImpactRow, ImpactSummary, SnapshotRecord } from "./types";
 
-const kinds = ["import", "reexport", "commonjs_import", "type_only_import", "dynamic_import"];
-const kindLabels: Record<string, string> = { import: "import", reexport: "re-export", commonjs_import: "require", type_only_import: "type-only", dynamic_import: "import()" };
+const kinds = ["import", "reexport", "commonjs_import", "type_only_import", "dynamic_import", "python_import", "rust_import", "conditional_import", "module_declaration"];
+const kindLabels: Record<string, string> = { import: "import", reexport: "re-export", commonjs_import: "require", type_only_import: "type-only", dynamic_import: "import()", python_import: "Python import", rust_import: "Rust use", conditional_import: "Условный импорт", module_declaration: "Rust mod (структура)" };
 const reasons: Record<string, string> = { "depth-limit": "Ограничение глубины", "node-budget": "Лимит посещённых узлов", "edge-budget": "Лимит проверенных рёбер", "time-budget": "Лимит времени обхода" };
 
 export function ImpactView({ analysis, snapshot, initialRoots, onGraph }: { analysis: AnalysisResult; snapshot: SnapshotRecord; initialRoots: string[]; onGraph: (scope: ImpactGraphScope) => void }) {
   const [roots, setRoots] = useState(initialRoots); const [picker, setPicker] = useState("");
-  const [edgeKinds, setEdgeKinds] = useState(kinds); const [depth, setDepth] = useState(""); const [retry, setRetry] = useState(0);
+  const [edgeKinds, setEdgeKinds] = useState(() => [...kinds.slice(0,5),...kinds.slice(5).filter(kind=>analysis.edges.some(edge=>edge.kind===kind))]); const [depth, setDepth] = useState(""); const [retry, setRetry] = useState(0);
   const [summary, setSummary] = useState<ImpactSummary | null>(null); const [page, setPage] = useState<ImpactPage | null>(null);
   const [search, setSearch] = useState(""); const [testsOnly, setTestsOnly] = useState(false);
   const [proof, setProof] = useState<{ row: ImpactRow; path: ImpactPath } | null>(null);
@@ -68,7 +68,7 @@ export function ImpactView({ analysis, snapshot, initialRoots, onGraph }: { anal
     <div className="panel impact-controls"><b>Исходные файлы · {roots.length}/32</b><div className="impact-roots">{roots.map(id => <button key={id} onClick={() => setRoots(roots.filter(root => root !== id))} title="Убрать исходный файл">{id}<X size={12} /></button>)}</div>
       <label>Добавить файл<input aria-label="Найти исходный файл" value={picker} onChange={event => setPicker(event.target.value)} placeholder="Путь или имя файла…" /></label>
       {choices.length > 0 && <div className="impact-choices">{choices.map(node => <button key={node.id} disabled={roots.length >= 32} onClick={() => { setRoots([...roots, node.id]); setPicker(""); }}>{node.path}</button>)}<small>Показано до 20 совпадений. Уточните путь для поиска.</small></div>}
-      <div className="impact-options"><button className="text-button" onClick={() => setEdgeKinds(kinds)}>Все импорты</button><button className="text-button" onClick={() => setEdgeKinds(kinds.slice(0, 3))}>Статические</button>{kinds.map(kind => <label key={kind} title={kind}><input type="checkbox" checked={edgeKinds.includes(kind)} onChange={() => setEdgeKinds(edgeKinds.includes(kind) ? edgeKinds.filter(item => item !== kind) : [...edgeKinds, kind])} />{kindLabels[kind]}</label>)}<label>Глубина<select aria-label="Глубина влияния" value={depth} onChange={event => setDepth(event.target.value)}><option value="">Без ограничения</option>{[1, 2, 3, 5, 10, 20, 64].map(value => <option key={value}>{value}</option>)}</select></label></div>
+      <div className="impact-options"><button className="text-button" onClick={() => setEdgeKinds(kinds.filter((kind,index)=>index<5||analysis.edges.some(edge=>edge.kind===kind)))}>{analysis.edges.some(edge=>edge.kind==="module_declaration")?"Все связи":"Все импорты"}</button><button className="text-button" onClick={() => setEdgeKinds(["import","reexport","commonjs_import",...kinds.filter(kind=>["python_import","rust_import"].includes(kind)&&analysis.edges.some(edge=>edge.kind===kind))])}>Статические</button>{kinds.map(kind => <label key={kind} title={kind}><input type="checkbox" checked={edgeKinds.includes(kind)} onChange={() => setEdgeKinds(edgeKinds.includes(kind) ? edgeKinds.filter(item => item !== kind) : [...edgeKinds, kind])} />{kindLabels[kind]}</label>)}<label>Глубина<select aria-label="Глубина влияния" value={depth} onChange={event => setDepth(event.target.value)}><option value="">Без ограничения</option>{[1, 2, 3, 5, 10, 20, 64].map(value => <option key={value}>{value}</option>)}</select></label></div>
       <small>Снимок {snapshot.id} · {new Date(snapshot.createdAt).toLocaleString("ru-RU")} · {snapshot.analyzerVersion}</small>
     </div>
     {!roots.length && <div className="all-clear"><Network size={25} /><h2>Выберите файл для анализа влияния</h2><p>Ищем тех, кто прямо или транзитивно импортирует выбранные файлы.</p></div>}

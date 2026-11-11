@@ -178,7 +178,7 @@ function App() {
         <div className="sidebar-caption">БЫСТРЫЕ ДЕЙСТВИЯ</div>
         <button className="quick-action" onClick={() => void scan()}><Plus size={17} /> Открыть проект</button>
         <button className="quick-action" disabled={!analysis || busy} onClick={() => analysis && void scan(analysis.summary.rootPath, true)}><RefreshCw size={16} className={busy ? "spin" : ""} /> Пересканировать</button>
-        <div className="sidebar-bottom"><span className="engine-status"><i /> Engine готов</span><span className="version">v0.7.0</span></div>
+        <div className="sidebar-bottom"><span className="engine-status"><i /> Engine готов</span><span className="version">v0.8.0</span></div>
       </aside>
 
       <main className={`main-content ${analysis && view === "graph" && detailsOpen ? "with-details" : "without-details"}`}>
@@ -191,6 +191,7 @@ function App() {
             </div>
             <button className="primary-button" disabled={busy} onClick={() => void scan(analysis.summary.rootPath, true)}>{busy ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{busy ? "Анализируем…" : "Запустить анализ"}</button>
           </div>
+          {analysis.analysisProfile && <details className="panel analysis-profile"><summary>Профиль анализа · {Object.keys(analysis.analysisProfile.analyzers).join(", ")}</summary>{analysis.analysisProfile.limitations.map(text=><p key={text}>{text}</p>)}{analysis.analysisProfile.analyzers.Python && <p>Python source roots: {analysis.analysisProfile.pythonRoots.map(root=>root||"корень").join(", ")}</p>}<p>Rust mod обозначает структуру, use — зависимость. Условные импорты не доказывают выполнение.</p></details>}
           {analysis.basis && <div className="snapshot-basis"><b>{analysis.basis.kind}</b> · {analysis.basis.commitOid ?? analysis.basis.observedHeadOid ?? "unborn HEAD"} · {analysis.basis.resolutionProfile} · {analysis.basis.captureConsistency}</div>}
           {error && <div className="error-banner"><AlertTriangle size={16} />{error}<button onClick={() => setError(null)}><XCircle size={15} /></button></div>}
           {view === "overview" && <Overview analysis={analysis} onOpenGraph={() => setView("graph")} onSelect={setSelected} />}
@@ -272,7 +273,7 @@ function ModulesView({ analysis, onSelect }: { analysis: AnalysisResult; onSelec
 }
 
 function PackagesView({ analysis }: { analysis: AnalysisResult }) {
-  return <section className="panel table-panel"><div className="table-toolbar"><div><b>{analysis.summary.externalPackageCount}</b><span>пакетов объявлено в package.json</span></div><div className="table-tools"><span className="table-chip"><Package size={13} /> npm</span></div></div><div className="table-wrap"><table><thead><tr><th>ПАКЕТ</th><th>ЗАДАННЫЙ ДИАПАЗОН</th><th>СОСТОЯНИЕ</th><th>ИМПОРТОВ</th></tr></thead><tbody>{analysis.summary.packages.map((pkg) => <tr key={pkg.name}><td><span className="file-cell package-cell"><Package size={16} />{pkg.name}</span></td><td><code>{pkg.version}</code></td><td><span className={`status-chip ${pkg.dependencyType === "объявлен" ? "ok" : "warning"}`}>{pkg.dependencyType}</span></td><td>{pkg.importedBy}</td></tr>)}</tbody></table>{!analysis.summary.packages.length && <div className="table-empty"><Package size={21} /><b>Импортируемые пакеты не найдены</b><span>Граф отражает пакеты, которые удалось извлечь из импортов.</span></div>}</div><p className="table-note">Для первой версии считывается package.json. Обновления и уязвимости не запрашиваются.</p></section>;
+  return <section className="panel table-panel"><div className="table-toolbar"><div><b>{analysis.summary.externalPackageCount}</b><span>пакетов и деклараций обнаружено</span></div><div className="table-tools"><span className="table-chip"><Package size={13} /> npm · Cargo · PyPI</span></div></div><div className="table-wrap"><table><thead><tr><th>ПАКЕТ</th><th>ЗАДАННЫЙ ДИАПАЗОН</th><th>СОСТОЯНИЕ</th><th>ИМПОРТОВ</th></tr></thead><tbody>{analysis.summary.packages.map((pkg) => <tr key={pkg.name}><td><span className="file-cell package-cell"><Package size={16} />{pkg.name}</span></td><td><code>{pkg.version}</code></td><td><span className={`status-chip ${pkg.dependencyType === "объявлен" || pkg.name.startsWith("Cargo ·") || pkg.name.startsWith("PyPI ·") ? "ok" : "warning"}`}>{pkg.dependencyType}</span></td><td>{pkg.importedBy}</td></tr>)}</tbody></table>{!analysis.summary.packages.length && <div className="table-empty"><Package size={21} /><b>Импортируемые пакеты не найдены</b><span>Граф отражает пакеты, которые удалось извлечь из импортов.</span></div>}</div><p className="table-note">Читаются package.json, Cargo.toml, pyproject.toml и requirements.txt. Декларация пакета не подтверждает установленную версию. Python import names не сопоставляются с PyPI автоматически.</p></section>;
 }
 
 function EmptyRow({ text }: { text: string }) { return <div className="empty-row">{text}</div>; }

@@ -6,6 +6,12 @@ mod git_jobs;
 #[cfg(test)]
 mod git_tests;
 mod impact;
+mod js_ts;
+mod language;
+mod native_languages;
+mod native_resolver;
+#[cfg(test)]
+mod native_tests;
 mod resolver;
 mod snapshot;
 mod storage;

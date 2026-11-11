@@ -2,9 +2,15 @@ use crate::analysis::CachedImport;
 use serde::{Deserialize, Serialize};
 
 pub const PROFILE: &str = "repository-only-v1";
-pub const POLICY: &str = "capture-v1:.git,node_modules,target,dist,build,coverage,.next,.turbo,vendor,out,.dependency-capture";
-pub const EXCLUDED: [&str; 11] = [
+pub const POLICY: &str = "capture-v2:.venv,venv,__pycache__,.tox,.mypy_cache,.pytest_cache,.git,node_modules,target,dist,build,coverage,.next,.turbo,vendor,out,.dependency-capture";
+pub const EXCLUDED: [&str; 17] = [
     ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
     "node_modules",
     "target",
     "dist",

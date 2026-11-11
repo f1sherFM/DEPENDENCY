@@ -28,7 +28,8 @@ export type Diagnostic = {
   category: "architecture" | "coverage"; title: string; explanation: string; suggestion: string;
   nodeIds: string[]; evidence: DiagnosticEvidence;
 };
-export type AnalysisResult = { basis?: SnapshotBasis | null; summary: ProjectSummary; nodes: GraphNode[]; edges: GraphEdge[]; diagnostics: Diagnostic[]; rulesRun: RulesRun | null };
+export type AnalysisResult = {
+  analysisProfile?: { graphSemantics: string; analyzers: Record<string,[string,string]>; pythonRoots: string[]; limitations: string[] } | null; basis?: SnapshotBasis | null; summary: ProjectSummary; nodes: GraphNode[]; edges: GraphEdge[]; diagnostics: Diagnostic[]; rulesRun: RulesRun | null };
 export type ProjectRecord = { id: string; name: string; rootPath: string; lastOpenedAt: number; latestSnapshotId: string | null; latestSnapshotAt: number | null };
 export type SnapshotRecord = { basis?: SnapshotBasis | null; id: string; projectId: string; createdAt: number; analyzerVersion: string; rulesVersion: string; parsedFileCount: number; reusedFileCount: number };
 export type ProjectView = { project: ProjectRecord; snapshot: SnapshotRecord; result: AnalysisResult };

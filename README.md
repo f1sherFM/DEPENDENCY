@@ -111,4 +111,20 @@ Coverage gaps and legacy analyzer versions are visible. A reachable consumer **m
 
 Implementation details and reproducible checks: [0.7 design](docs/version-0.7-design.md), [0.7 validation](docs/version-0.7-validation.md).
 
-Python, Rust, package lockfile resolution, arbitrary executable bundler aliases, staged/index snapshots, network Git operations and symbol-level impact analysis are not implemented yet. Metrics describe the files and edges that this analyzer can verify; they do not imply analysis of unsupported languages. Cooperative cancellation currently applies to Git analysis jobs.
+## Version 0.8: Rust and Python
+
+- Analyze mixed JS/TS, Rust and Python projects in the shared engine. Native language facts and per-language parser versions persist in cache and immutable snapshot inventory; unchanged JS/TS does not reparse when a Python analyzer changes.
+- Rust follows captured Cargo package lib/bin roots, module declarations and conservatively resolved use requests. Direct local path dependencies can link to captured library items. Cargo workspace dependency metadata, aliases and external package declarations are read without running Cargo/build scripts/macros.
+- Python follows indexed modules, relative imports and package initializers in flat/src or configured source roots. Ambiguity is explicit. From-import attributes, dynamic paths and distribution-name mapping are not guessed. pyproject.toml and simple requirements/include declarations remain separate from confirmed imports.
+- The UI shows the language profile/limits, ecosystem-qualified packages and distinct graph/Impact relation kinds. Structural Rust mod edges are excluded from dependency-cycle/coupling diagnostics. Native no-known-consumers guesses are disabled through explicit coverage limitations.
+- Profiles are stored in existing schema-2 JSON without a new migration. Old snapshots stay readable; incompatible profiles compare as observations with warnings. Git excludes Python environments/caches under a new capture policy.
+
+Optional source roots in `dependency.config.json` (alongside existing `rules`):
+
+```json
+{ "python": { "sourceRoots": ["src", "tools"] } }
+```
+
+Roots must stay inside the selected project scope. This describes the analyzer's static search profile, not an executed Python environment. Detailed supported cases, deliberate limitations and reproducible checks: [0.8 validation](docs/version-0.8-validation.md).
+
+Full Rust compiler name resolution/cfg/macros, Python runtime imports, package lockfile resolution, arbitrary executable bundler aliases, staged/index snapshots, network Git operations and symbol-level impact analysis remain outside this release. Cooperative cancellation applies to Git analysis jobs.

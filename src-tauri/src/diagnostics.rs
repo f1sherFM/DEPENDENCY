@@ -92,9 +92,17 @@ impl Default for RuleConfig {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RulesConfig {
     #[serde(default)]
+    pub python: PythonConfig,
+    #[serde(default)]
     pub rules: BTreeMap<String, RuleConfig>,
 }
 
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PythonConfig {
+    #[serde(default)]
+    pub source_roots: Vec<String>,
+}
 pub struct Settings {
     pub config: RulesConfig,
     exclusions: HashMap<String, GlobSet>,
@@ -253,7 +261,12 @@ pub fn evaluate(
     let internal: Vec<GraphEdge> = edges
         .iter()
         .filter(|edge| {
-            file_ids.contains(edge.source.as_str()) && file_ids.contains(edge.target.as_str())
+            file_ids.contains(edge.source.as_str())
+                && file_ids.contains(edge.target.as_str())
+                && !matches!(
+                    edge.kind.as_str(),
+                    "module_declaration" | "conditional_import"
+                )
         })
         .cloned()
         .collect();
@@ -314,7 +327,11 @@ pub fn evaluate(
                     .filter(|edge| {
                         matches!(
                             edge.kind.as_str(),
-                            "import" | "reexport" | "commonjs_import"
+                            "import"
+                                | "reexport"
+                                | "commonjs_import"
+                                | "python_import"
+                                | "rust_import"
                         )
                     })
                     .cloned()
@@ -346,7 +363,11 @@ pub fn evaluate(
                                 graph == "full"
                                     || matches!(
                                         edge.kind.as_str(),
-                                        "import" | "reexport" | "commonjs_import"
+                                        "import"
+                                            | "reexport"
+                                            | "commonjs_import"
+                                            | "python_import"
+                                            | "rust_import"
                                     )
                             })
                             .collect();

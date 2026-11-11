@@ -1,3 +1,5 @@
+use crate::js_ts::parse_imports;
+use crate::language::{SourceLanguage, language_for};
 use globset::{Glob, GlobSetBuilder};
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
@@ -7,7 +9,6 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use tree_sitter::{Language, Node, Parser};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,6 +91,8 @@ pub struct AnalysisResult {
     #[serde(default)]
     pub basis: Option<crate::snapshot::Basis>,
     #[serde(default)]
+    pub analysis_profile: Option<crate::language::AnalysisProfile>,
+    #[serde(default)]
     pub diagnostics: Vec<crate::diagnostics::Diagnostic>,
     #[serde(default)]
     pub rules_run: Option<crate::diagnostics::RulesRun>,
@@ -110,6 +113,8 @@ struct SourceFile {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CachedImport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<crate::native_languages::Fact>,
     pub specifier: String,
     pub kind: String,
     pub line: usize,
@@ -135,10 +140,11 @@ pub struct AnalysisOutput {
 }
 
 #[derive(Clone)]
-struct ImportDecl {
-    specifier: String,
-    kind: String,
-    line: usize,
+pub(crate) struct ImportDecl {
+    pub(crate) facts: Option<crate::native_languages::Fact>,
+    pub(crate) specifier: String,
+    pub(crate) kind: String,
+    pub(crate) line: usize,
 }
 
 pub fn analyze_project(
@@ -182,6 +188,12 @@ pub fn analyze_input(
     let mut all_file_paths = HashMap::<String, String>::new();
     let mut total_files = 0usize;
     let excluded = [
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".tox",
+        ".mypy_cache",
+        ".pytest_cache",
         ".git",
         "node_modules",
         "target",
@@ -248,8 +260,7 @@ pub fn analyze_input(
         };
         let lines = text.lines().count();
         let cached = cache_by_path.get(&normalize(&relative)).filter(|item| {
-            item.content_hash == content_hash
-                && item.analyzer_version == crate::storage::ANALYZER_VERSION
+            item.content_hash == content_hash && item.analyzer_version == language.parser_version()
         });
         let (imports, parse_error) = if let Some(item) = cached {
             reused_file_count += 1;
@@ -260,20 +271,26 @@ pub fn analyze_input(
                         specifier: import.specifier.clone(),
                         kind: import.kind.clone(),
                         line: import.line,
+                        facts: import.facts.clone(),
                     })
                     .collect(),
                 item.parse_error,
             )
         } else {
             parsed_file_count += 1;
-            let (imports, error) =
-                parse_imports(&text, language).unwrap_or_else(|_| (Vec::new(), true));
+            let (imports, error) = match language {
+                SourceLanguage::Rust | SourceLanguage::Python => {
+                    crate::native_languages::parse(&text, language)
+                }
+                _ => parse_imports(&text, language),
+            }
+            .unwrap_or_else(|_| (Vec::new(), true));
             (imports, error)
         };
         file_cache.push(ParsedFileCache {
             relative_path: relative.clone(),
             content_hash,
-            analyzer_version: crate::storage::ANALYZER_VERSION.into(),
+            analyzer_version: language.parser_version().into(),
             language: language.label().into(),
             lines,
             parse_error,
@@ -283,6 +300,7 @@ pub fn analyze_input(
                     specifier: import.specifier.clone(),
                     kind: import.kind.clone(),
                     line: import.line,
+                    facts: import.facts.clone(),
                 })
                 .collect(),
         });
@@ -317,6 +335,23 @@ pub fn analyze_input(
         }
     }
 
+    for language in ["Rust", "Python"] {
+        if files.iter().any(|f| f.language == language) {
+            scan_issues.push((language.into(),format!("{language}: статические зависимости; runtime, macro expansion и symbol resolution ограничены. no-known-consumers не применяется.")));
+        }
+    }
+    let native = crate::native_resolver::NativeResolver::new(
+        &root,
+        &files
+            .iter()
+            .map(|f| (f.relative.clone(), f.imports.clone()))
+            .collect::<Vec<_>>(),
+        all_file_paths.values().cloned().collect(),
+        &settings.config.python.source_roots,
+        cancel,
+    )?;
+    let settings_roots = native.python_roots();
+    scan_issues.extend(native.manifest_issues.clone());
     let mut nodes: Vec<GraphNode> = files
         .iter()
         .map(|file| GraphNode {
@@ -335,6 +370,26 @@ pub fn analyze_input(
             declared: None,
         })
         .collect();
+    for (id, package) in &native.declarations {
+        nodes.push(GraphNode {
+            id: id.clone(),
+            label: package.name.clone(),
+            path: id.clone(),
+            kind: "package".into(),
+            language: Some(
+                if id.starts_with("package:pypi:") {
+                    "Python"
+                } else {
+                    "Rust"
+                }
+                .into(),
+            ),
+            lines: 0,
+            incoming: 0,
+            outgoing: 0,
+            declared: Some(true),
+        });
+    }
     let mut edges = Vec::new();
     let mut extra_file_nodes = HashMap::<String, usize>::new();
     let mut resolution_issues = Vec::<ResolutionIssue>::new();
@@ -349,6 +404,38 @@ pub fn analyze_input(
     'imports: for (source_index, import) in source_imports {
         crate::snapshot::check_cancel(cancel)?;
         let source = &files[source_index];
+        if import.facts.is_some() {
+            let resolved = native.resolve(&source.relative, &import);
+            for (target, kind) in resolved.targets {
+                if let Some(target_index) = file_index
+                    .get(&normalize(&target))
+                    .copied()
+                    .or_else(|| nodes.iter().position(|n| n.id == target))
+                {
+                    nodes[source_index].outgoing += 1;
+                    nodes[target_index].incoming += 1;
+                    edges.push(GraphEdge {
+                        id: format!(
+                            "{}:{}:{target}:{kind}:{}",
+                            source.relative,
+                            import.line,
+                            edges.len()
+                        ),
+                        source: source.relative.clone(),
+                        target,
+                        kind,
+                        line: import.line,
+                    });
+                }
+            }
+            for issue in resolved.issues {
+                if issue.status == "ambiguous" {
+                    ambiguous_count += 1;
+                }
+                resolution_issues.push(issue);
+            }
+            continue;
+        }
         if is_builtin(&import.specifier) {
             continue;
         }
@@ -567,7 +654,14 @@ pub fn analyze_input(
         });
     }
     let file_count = files.len();
-    let cycles = find_cycles(&files, &edges);
+    let cycles = find_cycles(
+        &files,
+        &edges
+            .iter()
+            .filter(|e| !matches!(e.kind.as_str(), "module_declaration" | "conditional_import"))
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
     let unresolved_count = resolution_issues
         .iter()
         .filter(|issue| issue.status == "unresolved")
@@ -594,14 +688,35 @@ pub fn analyze_input(
             manifests: &manifests,
         },
     )?;
+    let analysis_profile = crate::language::profile(
+        &files
+            .iter()
+            .map(|f| f.language.as_str())
+            .collect::<Vec<_>>(),
+        &settings_roots,
+    );
+    let mut native_counts = HashMap::<&str, usize>::new();
+    for edge in &edges {
+        if edge.kind == "package" {
+            *native_counts.entry(edge.target.as_str()).or_default() += 1;
+        }
+    }
+    packages.extend(native.declarations.iter().map(|(id, p)| {
+        let mut p = p.clone();
+        p.imported_by = *native_counts.get(id.as_str()).unwrap_or(&0);
+        p
+    }));
     let summary = ProjectSummary {
         name: project_name,
         root_path: display_root(&root),
         file_count: total_files,
         source_file_count: file_count,
         module_count: module_dirs.len(),
-        dependency_count: edges.iter().filter(|e| e.kind != "package").count(),
-        external_package_count: declared_packages.len(),
+        dependency_count: edges
+            .iter()
+            .filter(|e| e.kind != "package" && e.kind != "module_declaration")
+            .count(),
+        external_package_count: nodes.iter().filter(|n| n.kind == "package").count(),
         cycle_count: cycles.len(),
         parse_error_count: parse_errors,
         unresolved_count,
@@ -618,6 +733,7 @@ pub fn analyze_input(
     Ok(AnalysisOutput {
         result: AnalysisResult {
             basis: None,
+            analysis_profile: Some(analysis_profile),
             diagnostics,
             rules_run: Some(rules_run),
             summary,
@@ -628,180 +744,6 @@ pub fn analyze_input(
         parsed_file_count,
         reused_file_count,
     })
-}
-
-#[derive(Clone, Copy)]
-enum SourceLanguage {
-    JavaScript,
-    TypeScript,
-    Tsx,
-}
-
-impl SourceLanguage {
-    fn label(self) -> &'static str {
-        match self {
-            Self::JavaScript => "JavaScript",
-            Self::TypeScript => "TypeScript",
-            Self::Tsx => "TSX",
-        }
-    }
-    fn grammar(self) -> Language {
-        match self {
-            Self::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
-            Self::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
-        }
-    }
-}
-
-fn language_for(path: &Path) -> Option<SourceLanguage> {
-    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
-        "js" | "mjs" | "cjs" | "jsx" => Some(SourceLanguage::JavaScript),
-        "ts" | "mts" | "cts" => Some(SourceLanguage::TypeScript),
-        "tsx" => Some(SourceLanguage::Tsx),
-        _ => None,
-    }
-}
-
-fn parse_imports(
-    source: &str,
-    language: SourceLanguage,
-) -> Result<(Vec<ImportDecl>, bool), String> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&language.grammar())
-        .map_err(|e| e.to_string())?;
-    let tree = parser
-        .parse(source, None)
-        .ok_or("Не удалось разобрать исходный файл")?;
-    let mut imports = Vec::new();
-    let mut stack = vec![tree.root_node()];
-    while let Some(node) = stack.pop() {
-        match node.kind() {
-            "import_statement" => {
-                if let Some(source_node) = node.child_by_field_name("source")
-                    && let Some(specifier) = string_value(source_node, source)
-                {
-                    imports.push(ImportDecl {
-                        specifier,
-                        kind: if is_type_only_statement(node) {
-                            "type_only_import"
-                        } else {
-                            "import"
-                        }
-                        .into(),
-                        line: node.start_position().row + 1,
-                    });
-                }
-            }
-            "export_statement" => {
-                if let Some(source_node) = node.child_by_field_name("source")
-                    && let Some(specifier) = string_value(source_node, source)
-                {
-                    imports.push(ImportDecl {
-                        specifier,
-                        kind: if is_type_only_statement(node) {
-                            "type_only_import"
-                        } else {
-                            "reexport"
-                        }
-                        .into(),
-                        line: node.start_position().row + 1,
-                    });
-                }
-            }
-            "call_expression" => {
-                let function = node.child_by_field_name("function");
-                let arguments = node.child_by_field_name("arguments");
-                if let (Some(function), Some(arguments)) = (function, arguments) {
-                    let function_text = function.utf8_text(source.as_bytes()).unwrap_or("");
-                    let kind = if function_text == "import" {
-                        Some("dynamic_import")
-                    } else if function_text == "require" {
-                        Some("commonjs_import")
-                    } else {
-                        None
-                    };
-                    if let (Some(kind), Some(argument)) = (kind, arguments.named_child(0))
-                        && let Some(specifier) = string_value(argument, source)
-                    {
-                        imports.push(ImportDecl {
-                            specifier,
-                            kind: kind.into(),
-                            line: node.start_position().row + 1,
-                        });
-                    }
-                }
-            }
-            _ => {}
-        }
-        let mut cursor = node.walk();
-        let children = node.named_children(&mut cursor);
-        for child in children {
-            stack.push(child);
-        }
-    }
-    imports.sort_by(|a, b| {
-        a.line
-            .cmp(&b.line)
-            .then_with(|| a.specifier.cmp(&b.specifier))
-    });
-    Ok((imports, tree.root_node().has_error()))
-}
-
-fn is_type_only_statement(node: Node) -> bool {
-    fn has_type_token(node: Node) -> bool {
-        let mut cursor = node.walk();
-        node.children(&mut cursor)
-            .any(|child| child.kind() == "type")
-    }
-    if has_type_token(node) {
-        return true;
-    }
-    let mut cursor = node.walk();
-    let Some(clause) = node
-        .named_children(&mut cursor)
-        .find(|child| matches!(child.kind(), "import_clause" | "export_clause"))
-    else {
-        return false;
-    };
-    let mut cursor = clause.walk();
-    let children: Vec<_> = clause
-        .named_children(&mut cursor)
-        .filter(|child| child.kind() != "comment")
-        .collect();
-    let specifiers = if clause.kind() == "import_clause" {
-        if children.len() != 1 || children[0].kind() != "named_imports" {
-            return false;
-        }
-        let mut cursor = children[0].walk();
-        children[0]
-            .named_children(&mut cursor)
-            .filter(|child| child.kind() != "comment")
-            .collect::<Vec<_>>()
-    } else {
-        children
-    };
-    !specifiers.is_empty()
-        && specifiers
-            .iter()
-            .all(|specifier| has_type_token(*specifier))
-}
-
-fn string_value(node: Node, source: &str) -> Option<String> {
-    let raw = node.utf8_text(source.as_bytes()).ok()?;
-    if raw.len() < 2 {
-        return None;
-    }
-    let body = &raw[1..raw.len() - 1];
-    if body.contains("${") {
-        return None;
-    }
-    Some(
-        body.replace("\\'", "'")
-            .replace("\\\"", "\"")
-            .replace("\\\\", "\\"),
-    )
 }
 
 fn add_asset_edge(
