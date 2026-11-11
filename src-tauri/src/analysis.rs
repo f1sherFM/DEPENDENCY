@@ -88,6 +88,8 @@ pub struct GraphEdge {
 #[serde(rename_all = "camelCase")]
 pub struct AnalysisResult {
     #[serde(default)]
+    pub basis: Option<crate::snapshot::Basis>,
+    #[serde(default)]
     pub diagnostics: Vec<crate::diagnostics::Diagnostic>,
     #[serde(default)]
     pub rules_run: Option<crate::diagnostics::RulesRun>,
@@ -143,6 +145,20 @@ pub fn analyze_project(
     root: &str,
     cached_files: Vec<ParsedFileCache>,
 ) -> Result<AnalysisOutput, String> {
+    analyze_input(
+        root,
+        cached_files,
+        false,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+}
+
+pub fn analyze_input(
+    root: &str,
+    cached_files: Vec<ParsedFileCache>,
+    isolated: bool,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<AnalysisOutput, String> {
     let root =
         fs::canonicalize(root).map_err(|e| format!("Не удалось открыть каталог проекта: {e}"))?;
     if !root.is_dir() {
@@ -179,15 +195,17 @@ pub fn analyze_project(
     ];
     let walker = WalkBuilder::new(&root)
         .hidden(false)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
+        .git_ignore(!isolated)
+        .git_global(!isolated)
+        .git_exclude(!isolated)
+        .ignore(!isolated)
         .filter_entry(move |entry| {
             !entry.file_type().is_some_and(|t| t.is_dir())
                 || !excluded.contains(&entry.file_name().to_string_lossy().as_ref())
         })
         .build();
     for entry in walker {
+        crate::snapshot::check_cancel(cancel)?;
         let entry = match entry {
             Ok(value) => value,
             Err(error) => {
@@ -323,8 +341,13 @@ pub fn analyze_project(
     let mut ambiguous_count = 0usize;
     let mut imported_packages = BTreeMap::<String, usize>::new();
     let mut package_imports = Vec::<(usize, String, usize)>::new();
-    let mut resolver_pool = crate::resolver::ResolverPool::new(&root);
+    let mut resolver_pool = if isolated {
+        crate::resolver::ResolverPool::with_isolation(&root, true)
+    } else {
+        crate::resolver::ResolverPool::new(&root)
+    };
     'imports: for (source_index, import) in source_imports {
+        crate::snapshot::check_cancel(cancel)?;
         let source = &files[source_index];
         if is_builtin(&import.specifier) {
             continue;
@@ -594,6 +617,7 @@ pub fn analyze_project(
     };
     Ok(AnalysisOutput {
         result: AnalysisResult {
+            basis: None,
             diagnostics,
             rules_run: Some(rules_run),
             summary,

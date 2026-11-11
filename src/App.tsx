@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { GraphView } from "./GraphView";
 import { ProblemsView } from "./ProblemsView";
 import { ImpactView } from "./ImpactView";
+import { GitView } from "./GitView";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -11,9 +12,9 @@ import {
   Plus, RefreshCw, XCircle, Settings2, Share2, ShieldCheck, Sparkles, Unplug,
 
 } from "lucide-react";
-import type { AnalysisResult, Diagnostic, GraphNode, ImpactGraphScope, ProjectRecord, ProjectView, SnapshotRecord } from "./types";
+import type { AnalysisResult, Diagnostic, GraphNode, ImpactGraphScope, ProjectRecord, ProjectView, SnapshotRecord, GitJob } from "./types";
 
-type View = "overview" | "graph" | "modules" | "packages" | "problems" | "history" | "impact";
+type View = "overview" | "graph" | "modules" | "packages" | "problems" | "history" | "impact" | "git";
 const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "overview", label: "Обзор", icon: LayoutDashboard },
   { id: "graph", label: "Зависимости", icon: Network },
@@ -22,6 +23,7 @@ const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "problems", label: "Проблемы", icon: AlertTriangle },
   { id: "history", label: "Снимки", icon: Clock3 },
   { id: "impact", label: "Анализ влияния", icon: Share2 },
+  { id: "git", label: "Git и сравнение", icon: Code2 },
 ];
 
 function App() {
@@ -37,24 +39,32 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(true);
+  const [gitVisited, setGitVisited] = useState(false);
+  const [gitJobId, setGitJobId] = useState<string | null>(null);
+  const navigationGeneration = useRef(0);
   const graphSearch = useRef<HTMLInputElement>(null);
 
   const refreshProjects = async () => setProjects(await invoke<ProjectRecord[]>("list_projects"));
   useEffect(() => {
+    const token = ++navigationGeneration.current;
     void invoke<ProjectRecord[]>("list_projects").then(async (saved) => {
+      if (token !== navigationGeneration.current) return;
       setProjects(saved);
       if (saved[0]) {
-        try { showProject(await invoke<ProjectView>("load_project", { projectId: saved[0].id })); }
-        catch (reason) { setError(String(reason)); }
+        try { const project = await invoke<ProjectView>("load_project", { projectId: saved[0].id }); if (token === navigationGeneration.current) showProject(project); }
+        catch (reason) { if (token === navigationGeneration.current) setError(String(reason)); }
       }
-    }).catch((reason) => setError(String(reason)));
+    }).catch((reason) => { if (token === navigationGeneration.current) setError(String(reason)); });
   }, []);
   useEffect(() => {
     if (!currentProject) { setSnapshots([]); return; }
-    void invoke<SnapshotRecord[]>("list_snapshots", { projectId: currentProject.project.id }).then(setSnapshots).catch((reason) => setError(String(reason)));
+    let live = true;
+    void invoke<SnapshotRecord[]>("list_snapshots", { projectId: currentProject.project.id }).then(result => { if (live) setSnapshots(result); }).catch((reason) => { if (live) setError(String(reason)); });
+    return () => { live = false; };
   }, [currentProject?.project.id, currentProject?.snapshot.id]);
 
   const showProject = (project: ProjectView) => {
+    if (currentProject?.project.id !== project.project.id) setGitVisited(false);
     setCurrentProject(project); setAnalysis(project.result); setGraphDiagnostic(null); setImpactScope(null); setImpactRoots([]); setSelected(null); setView("overview");
     void refreshProjects().catch(() => {});
   };
@@ -70,41 +80,66 @@ function App() {
   });
 
   const scan = async (path?: string, force = false) => {
+    if (busy) return;
+    const token = ++navigationGeneration.current;
     let root = path;
     if (!root) {
       const choice = await open({ directory: true, multiple: false, title: "Выберите папку проекта" });
       if (!choice || Array.isArray(choice)) return;
       root = choice;
     }
+    if (token !== navigationGeneration.current) return;
     setBusy(true); setError(null);
     try {
       if (!force) {
         const saved = await invoke<ProjectView | null>("open_project", { root });
-        if (saved) { showProject(saved); return; }
+        if (saved) { if (token === navigationGeneration.current) showProject(saved); return; }
       }
-      const result = await invoke<ProjectView>("analyze_project", { root });
-      showProject(result);
+      let result: ProjectView;
+      if (await invoke<boolean>("discover_git", { root })) {
+        const id = await invoke<string>("start_git_analysis", { root, reference: null }); setGitJobId(id);
+        while (true) {
+          const job = await invoke<GitJob | null>("get_git_job", { jobId: id });
+          if (!job) throw new Error("Git job недоступен");
+          if (job.done) { if (job.error || !job.snapshotId) throw new Error(job.error ?? "Git analysis failed"); result = await invoke<ProjectView>("load_snapshot", { snapshotId: job.snapshotId }); break; }
+          await new Promise(resolve => window.setTimeout(resolve, 400));
+        }
+      } else { result = await invoke<ProjectView>("analyze_project", { root }); }
+      if (token === navigationGeneration.current) showProject(result);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally { setBusy(false); }
+      if (token === navigationGeneration.current) setError(reason instanceof Error ? reason.message : String(reason));
+    } finally { if (token === navigationGeneration.current) { setBusy(false); setGitJobId(null); } }
   };
 
   const openSavedProject = async (id: string) => {
+    if (busy) return;
+    const token = ++navigationGeneration.current;
     setBusy(true); setError(null);
-    try { showProject(await invoke<ProjectView>("load_project", { projectId: id })); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
-    finally { setBusy(false); }
+    try { const project = await invoke<ProjectView>("load_project", { projectId: id }); if (token === navigationGeneration.current) showProject(project); }
+    catch (reason) { if (token === navigationGeneration.current) setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { if (token === navigationGeneration.current) { setBusy(false); setGitJobId(null); } }
   };
 
   const openSnapshot = async (id: string) => {
+    if (busy) return;
+    const token = ++navigationGeneration.current;
     setBusy(true); setError(null);
-    try { showProject(await invoke<ProjectView>("load_snapshot", { snapshotId: id })); setView("history"); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
-    finally { setBusy(false); }
+    try { const project = await invoke<ProjectView>("load_snapshot", { snapshotId: id }); if (token === navigationGeneration.current) { showProject(project); setView("history"); } }
+    catch (reason) { if (token === navigationGeneration.current) setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { if (token === navigationGeneration.current) { setBusy(false); setGitJobId(null); } }
   };
 
   const selectNode = (id: string) => { setSelected(id); if (!graphDiagnostic?.nodeIds.includes(id)) setGraphDiagnostic(null); if (!impactScope?.nodeIds.includes(id)) setImpactScope(null); };
   const openImpact = (id: string) => { setImpactRoots([id]); setImpactScope(null); setGraphDiagnostic(null); setView("impact"); };
+  const openGitSnapshot = async (snapshotId: string, nodeId?: string, impact = false) => {
+    if (busy) return;
+    const token = ++navigationGeneration.current;
+    const project = await invoke<ProjectView>("load_snapshot", { snapshotId });
+    if (token !== navigationGeneration.current) return;
+    showProject(project); setGitVisited(true);
+    if (nodeId && project.result.nodes.some(node => node.id === nodeId)) { setSelected(nodeId); if (impact) setImpactRoots([nodeId]); }
+    setView(impact && nodeId ? "impact" : "graph");
+  };
   const selectedNode = analysis?.nodes.find((node) => node.id === selected) ?? null;
 
   return (
@@ -132,7 +167,7 @@ function App() {
         </div>
         <div className="sidebar-caption">ПРОЕКТ</div>
         <nav className="main-nav" aria-label="Разделы проекта">
-          {navItems.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${view === id ? "active" : ""}`} onClick={() => setView(id)}>
+          {navItems.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${view === id ? "active" : ""}`} onClick={() => { if (id === "git") setGitVisited(true); setView(id); }}>
             <Icon size={18} strokeWidth={1.8} /><span>{label}</span>
             {analysis && <span className="nav-count">{id === "graph" ? analysis.summary.dependencyCount : id === "modules" ? analysis.summary.moduleCount : id === "packages" ? analysis.summary.externalPackageCount : id === "problems" ? (analysis.rulesRun ? analysis.diagnostics.filter(item => item.severity !== "info").length : analysis.summary.cycleCount + analysis.summary.unresolvedCount + analysis.summary.ambiguousCount + analysis.summary.parseErrorCount) : ""}</span>}
           </button>)}
@@ -143,18 +178,20 @@ function App() {
         <div className="sidebar-caption">БЫСТРЫЕ ДЕЙСТВИЯ</div>
         <button className="quick-action" onClick={() => void scan()}><Plus size={17} /> Открыть проект</button>
         <button className="quick-action" disabled={!analysis || busy} onClick={() => analysis && void scan(analysis.summary.rootPath, true)}><RefreshCw size={16} className={busy ? "spin" : ""} /> Пересканировать</button>
-        <div className="sidebar-bottom"><span className="engine-status"><i /> Engine готов</span><span className="version">v0.6.0</span></div>
+        <div className="sidebar-bottom"><span className="engine-status"><i /> Engine готов</span><span className="version">v0.7.0</span></div>
       </aside>
 
       <main className={`main-content ${analysis && view === "graph" && detailsOpen ? "with-details" : "without-details"}`}>
+        {gitJobId && <button className="text-button" onClick={() => void invoke("cancel_git_job", { jobId: gitJobId }).catch(reason => setError(String(reason)))}>Отменить Git-анализ</button>}
         {!analysis ? <Welcome busy={busy} error={error} onOpen={() => void scan()} /> : <>
           <div className="page-heading">
             <div><div className="eyebrow"><span className="crumb">{analysis.summary.name}</span><ArrowRight size={12} /><span>{navItems.find((item) => item.id === view)?.label}</span></div>
-              <h1>{view === "overview" ? "Обзор проекта" : view === "graph" ? "Граф зависимостей" : view === "modules" ? "Модули проекта" : view === "packages" ? "Внешние пакеты" : view === "history" ? "История снимков" : view === "impact" ? "Анализ влияния" : "Проблемы анализа"}</h1>
+              <h1>{view === "overview" ? "Обзор проекта" : view === "graph" ? "Граф зависимостей" : view === "modules" ? "Модули проекта" : view === "packages" ? "Внешние пакеты" : view === "history" ? "История снимков" : view === "impact" ? "Анализ влияния" : view === "git" ? "Git и сравнение архитектуры" : "Проблемы анализа"}</h1>
               <p className="subheading">{view === "overview" ? "Структура и связи, обнаруженные в выбранном репозитории." : `${analysis.summary.rootPath}`}</p>
             </div>
             <button className="primary-button" disabled={busy} onClick={() => void scan(analysis.summary.rootPath, true)}>{busy ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{busy ? "Анализируем…" : "Запустить анализ"}</button>
           </div>
+          {analysis.basis && <div className="snapshot-basis"><b>{analysis.basis.kind}</b> · {analysis.basis.commitOid ?? analysis.basis.observedHeadOid ?? "unborn HEAD"} · {analysis.basis.resolutionProfile} · {analysis.basis.captureConsistency}</div>}
           {error && <div className="error-banner"><AlertTriangle size={16} />{error}<button onClick={() => setError(null)}><XCircle size={15} /></button></div>}
           {view === "overview" && <Overview analysis={analysis} onOpenGraph={() => setView("graph")} onSelect={setSelected} />}
           {view === "graph" && <GraphView key={currentProject?.snapshot.id} analysis={analysis} selected={selected} onSelect={selectNode} searchInput={graphSearch} detailsOpen={detailsOpen} setDetailsOpen={setDetailsOpen} diagnostic={graphDiagnostic} onClearDiagnostic={() => { setGraphDiagnostic(null); setImpactScope(null); }} impactScope={impactScope} onOpenImpact={() => setView("impact")} onOpenDiagnostic={() => setView("problems")} />}
@@ -162,6 +199,7 @@ function App() {
           {view === "packages" && <PackagesView analysis={analysis} />}
           {view === "problems" && <ProblemsView key={currentProject?.snapshot.id} activeDiagnosticId={graphDiagnostic?.id} analysis={analysis} onShowGraph={(diagnostic) => { setImpactScope(null); setGraphDiagnostic(diagnostic); setSelected(null); setView("graph"); }} onSelect={(id) => { selectNode(id); setView("graph"); }} />}
           {view === "history" && <HistoryView snapshots={snapshots} current={currentProject?.snapshot.id ?? ""} onOpen={openSnapshot} />}
+          {currentProject && (gitVisited || view === "git") && <div hidden={view !== "git"}><GitView key={currentProject.project.id} root={analysis.summary.rootPath} projectId={currentProject.project.id} snapshot={currentProject.snapshot} analysis={analysis} externalBusy={busy} onOpen={openGitSnapshot} /></div>}
           {currentProject && <div hidden={view !== "impact"}><ImpactView key={currentProject.snapshot.id} analysis={analysis} snapshot={currentProject.snapshot} initialRoots={impactRoots} onGraph={(scope) => { setImpactScope(scope); setGraphDiagnostic(null); setSelected(null); setView("graph"); }} /></div>}
           <div className="status-line"><span><ShieldCheck size={13} /> Исходный код не запускается</span><span><Clock3 size={13} /> Снимок {formatDate(currentProject?.snapshot.createdAt ?? 0)} · анализатор {currentProject?.snapshot.analyzerVersion ?? "—"}</span></div>
         </>}

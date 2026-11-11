@@ -1,7 +1,13 @@
 mod analysis;
+mod comparison;
 mod diagnostics;
+mod git;
+mod git_jobs;
+#[cfg(test)]
+mod git_tests;
 mod impact;
 mod resolver;
+mod snapshot;
 mod storage;
 
 use tauri::{Manager, State};
@@ -133,11 +139,128 @@ async fn get_impact_path(
         .map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+async fn discover_git(root: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || git::discover(&root))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn git_status(root: String, offset: usize, limit: usize) -> Result<git::GitStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || git::status(&root, offset, limit))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn git_refs(
+    root: String,
+    offset: usize,
+    limit: usize,
+) -> Result<git::Page<git::RefRow>, String> {
+    tauri::async_runtime::spawn_blocking(move || git::refs(&root, offset, limit))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn git_commits(
+    root: String,
+    reference: String,
+    offset: usize,
+    limit: usize,
+) -> Result<git::Page<git::CommitRow>, String> {
+    tauri::async_runtime::spawn_blocking(move || git::commits(&root, &reference, offset, limit))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn start_git_analysis(
+    root: String,
+    reference: Option<String>,
+    state: State<'_, storage::AppState>,
+    jobs: State<'_, git_jobs::GitJobs>,
+) -> Result<String, String> {
+    jobs.start(state.inner().clone(), root, reference)
+}
+#[tauri::command]
+async fn get_git_job(
+    job_id: Option<String>,
+    jobs: State<'_, git_jobs::GitJobs>,
+) -> Result<Option<git_jobs::JobStatus>, String> {
+    match job_id {
+        Some(id) => jobs.status(&id).map(Some),
+        None => jobs.current_status(),
+    }
+}
+#[tauri::command]
+async fn cancel_git_job(job_id: String, jobs: State<'_, git_jobs::GitJobs>) -> Result<(), String> {
+    jobs.cancel(&job_id)
+}
+#[tauri::command]
+async fn compare_snapshots(
+    base_id: String,
+    target_id: String,
+    state: State<'_, storage::AppState>,
+    comparisons: State<'_, comparison::Comparisons>,
+) -> Result<comparison::Summary, String> {
+    let state = state.inner().clone();
+    let comparisons = comparisons.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || comparisons.compare(&state, &base_id, &target_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn comparison_page(
+    id: String,
+    offset: usize,
+    limit: usize,
+    category: String,
+    text: String,
+    comparisons: State<'_, comparison::Comparisons>,
+) -> Result<comparison::Page, String> {
+    let comparisons = comparisons.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        comparisons.page(&id, offset, limit, &category, &text)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn git_snapshot_page(
+    project_id: String,
+    offset: usize,
+    limit: usize,
+    state: State<'_, storage::AppState>,
+) -> Result<git::Page<storage::SnapshotRecord>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        storage::snapshot_page(&state, &project_id, offset, limit)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn snapshot_inventory(
+    snapshot_id: String,
+    offset: usize,
+    limit: usize,
+    state: State<'_, storage::AppState>,
+) -> Result<git::Page<storage::InventoryRow>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        storage::inventory_page(&state, &snapshot_id, offset, limit)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(impact::ImpactState::default())
+        .manage(git_jobs::GitJobs::default())
+        .manage(comparison::Comparisons::default())
         .setup(|app| {
             let database_path = app.path().app_data_dir()?.join("dependency.sqlite3");
             let storage = storage::initialize(database_path).map_err(std::io::Error::other)?;
@@ -160,7 +283,18 @@ pub fn run() {
             load_snapshot,
             get_impact,
             get_impact_page,
-            get_impact_path
+            get_impact_path,
+            discover_git,
+            git_status,
+            git_refs,
+            git_commits,
+            start_git_analysis,
+            get_git_job,
+            cancel_git_job,
+            compare_snapshots,
+            comparison_page,
+            git_snapshot_page,
+            snapshot_inventory
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");

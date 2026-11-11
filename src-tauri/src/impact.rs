@@ -674,6 +674,7 @@ mod tests {
     }
     fn result(names: &[&str], edges: Vec<GraphEdge>) -> AnalysisResult {
         AnalysisResult {
+            basis: None,
             summary: ProjectSummary {
                 name: "test".into(),
                 root_path: "missing".into(),
@@ -713,6 +714,7 @@ mod tests {
     }
     fn snapshot() -> SnapshotRecord {
         SnapshotRecord {
+            basis: None,
             id: "snapshot".into(),
             project_id: "project".into(),
             created_at: 0,

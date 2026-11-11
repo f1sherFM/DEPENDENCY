@@ -1,23 +1,32 @@
-use oxc_resolver::{ResolveError, ResolveOptions, Resolver, TsconfigOptions, TsconfigReferences};
+use oxc_resolver::{
+    FileMetadata, FileSystem, FileSystemOs, FsCache, ResolveError, ResolveOptions, ResolverGeneric,
+    TsconfigOptions, TsconfigReferences,
+};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 /// A resolver is cached per nearest project config and import condition. It reads
 /// package/config files but never evaluates JavaScript or TypeScript config code.
 pub struct ResolverPool {
     root: PathBuf,
-    resolvers: HashMap<(Option<PathBuf>, u8, bool), Resolver>,
+    resolvers: HashMap<(Option<PathBuf>, u8, bool), ResolverGeneric<FsCache<FencedFs>>>,
     node_resolution: HashMap<Option<PathBuf>, bool>,
+    isolated: bool,
 }
 
 impl ResolverPool {
     pub fn new(root: &Path) -> Self {
+        Self::with_isolation(root, false)
+    }
+    pub fn with_isolation(root: &Path, isolated: bool) -> Self {
         Self {
             root: root.to_path_buf(),
             resolvers: HashMap::new(),
             node_resolution: HashMap::new(),
+            isolated,
         }
     }
 
@@ -60,29 +69,34 @@ impl ResolverPool {
                 config_file,
                 references: TsconfigReferences::Auto,
             });
-            Resolver::new(ResolveOptions {
-                tsconfig: config,
-                condition_names: conditions,
-                extensions: [
-                    ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json", ".css",
-                    ".scss", ".sass", ".less", ".svg", ".png", ".jpg", ".jpeg", ".webp", ".gif",
-                    ".avif", ".wasm",
-                ]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-                extension_alias: vec![
-                    (
-                        ".js".into(),
-                        vec![".ts".into(), ".tsx".into(), ".js".into()],
-                    ),
-                    (".mjs".into(), vec![".mts".into(), ".mjs".into()]),
-                    (".cjs".into(), vec![".cts".into(), ".cjs".into()]),
-                ],
-                main_fields: vec!["module".into(), "main".into()],
-                fully_specified: strict_esm,
-                ..ResolveOptions::default()
-            })
+            ResolverGeneric::new_with_cache(
+                Arc::new(FsCache::new(FencedFs {
+                    root: self.isolated.then(|| self.root.clone()),
+                })),
+                ResolveOptions {
+                    tsconfig: config,
+                    condition_names: conditions,
+                    extensions: [
+                        ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json",
+                        ".css", ".scss", ".sass", ".less", ".svg", ".png", ".jpg", ".jpeg",
+                        ".webp", ".gif", ".avif", ".wasm",
+                    ]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                    extension_alias: vec![
+                        (
+                            ".js".into(),
+                            vec![".ts".into(), ".tsx".into(), ".js".into()],
+                        ),
+                        (".mjs".into(), vec![".mts".into(), ".mjs".into()]),
+                        (".cjs".into(), vec![".cts".into(), ".cjs".into()]),
+                    ],
+                    main_fields: vec!["module".into(), "main".into()],
+                    fully_specified: strict_esm,
+                    ..ResolveOptions::default()
+                },
+            )
         });
         resolver
             .resolve(directory, specifier)
@@ -184,6 +198,7 @@ fn resolve_extends(config: &Path, specifier: &str, root: &Path) -> Option<PathBu
 }
 
 fn config_candidate(path: PathBuf, root: &Path) -> Option<PathBuf> {
+    let path = lexical_path(&path);
     if !path.starts_with(root) {
         return None;
     }
@@ -201,6 +216,62 @@ fn config_candidate(path: PathBuf, root: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn lexical_path(path: &Path) -> PathBuf {
+    let mut output = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                output.pop();
+            }
+            std::path::Component::CurDir => {}
+            _ => output.push(component.as_os_str()),
+        }
+    }
+    output
+}
+struct FencedFs {
+    root: Option<PathBuf>,
+}
+impl FencedFs {
+    fn check(&self, path: &Path) -> std::io::Result<()> {
+        if self
+            .root
+            .as_ref()
+            .is_some_and(|root| !lexical_path(path).starts_with(root))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "outside captured repository",
+            ));
+        }
+        Ok(())
+    }
+}
+impl FileSystem for FencedFs {
+    fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
+        self.check(path)?;
+        FileSystemOs::read_to_string(path)
+    }
+    fn metadata(&self, path: &Path) -> std::io::Result<FileMetadata> {
+        self.check(path)?;
+        FileSystemOs::metadata(path)
+    }
+    fn symlink_metadata(&self, path: &Path) -> std::io::Result<FileMetadata> {
+        self.check(path)?;
+        FileSystemOs::symlink_metadata(path)
+    }
+    fn read_link(&self, path: &Path) -> std::io::Result<PathBuf> {
+        self.check(path)?;
+        if self.root.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "captured links are not followed",
+            ));
+        }
+        FileSystemOs::read_link(path)
+    }
 }
 
 fn is_esm_source(source_file: &Path, root: &Path) -> bool {

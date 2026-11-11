@@ -66,15 +66,30 @@ try {
   };
   const bridge = result => `(() => {
     const result = ${JSON.stringify(result)};
-    const project = { id: 'test-project', name: result.summary.name, rootPath: result.summary.rootPath, lastOpenedAt: 0, latestSnapshotId: 'snapshot', latestSnapshotAt: 0 };
+    const gitFixture=${JSON.stringify(fixture.git ?? null)};
+    const project = gitFixture?.views.find(view=>view.snapshot.id===${JSON.stringify(fixture.snapshot?.id??"")})?.project ?? { id: ${JSON.stringify(fixture.snapshot?.projectId??'test-project')}, name: result.summary.name, rootPath: result.summary.rootPath, lastOpenedAt: 0, latestSnapshotId: 'snapshot', latestSnapshotAt: 0 };
     const snapshot = ${JSON.stringify(fixture.snapshot ?? null)} ?? { id: 'snapshot', projectId: project.id, createdAt: 0, analyzerVersion: 'test-dump', rulesVersion: result.rulesRun?.version ?? 'legacy', parsedFileCount: 0, reusedFileCount: 0 };
     const impactCases = ${JSON.stringify(fixture.cases ?? [])};
     const key = request => JSON.stringify([request.roots.slice().sort(),request.edgeKinds.slice().sort(),request.maxDepth]);
     window.__impactCalls = [];
     window.__TAURI_INTERNALS__ = { invoke: async (cmd, args) => {
       if (cmd === 'list_projects') return [project];
-      if (cmd === 'list_snapshots') return [snapshot];
+      if (cmd === 'list_snapshots') return gitFixture?.snapshots.items ?? [snapshot];
+      if (cmd === 'load_snapshot' && gitFixture) return gitFixture.views.find(view=>view.snapshot.id===args.snapshotId);
       if (cmd === 'load_project' || cmd === 'load_snapshot') return { project, snapshot, result };
+      if(cmd==='discover_git') return !!gitFixture;
+      if(gitFixture){
+        if(cmd==='git_status') return gitFixture.status;
+        if(cmd==='git_refs') return gitFixture.refs;
+        if(cmd==='git_commits') return gitFixture.commits;
+        if(cmd==='git_snapshot_page') return gitFixture.snapshots;
+        if(cmd==='snapshot_inventory') return gitFixture.inventories[args.snapshotId];
+        if(cmd==='start_git_analysis') {window.__jobPolls=0;window.__gitJob={id:'fixture-job',root:project.rootPath,phase:'capturing',fileCount:0,done:false,error:null,snapshotId:null};return window.__gitJob.id;}
+        if(cmd==='get_git_job') {if(window.__gitJob&&!window.__gitJob.done&&args.jobId){if(++window.__jobPolls>=2)window.__gitJob={...window.__gitJob,phase:'complete',done:true,fileCount:10,snapshotId:gitFixture.commitView.snapshot.id};}return window.__gitJob??null;}
+        if(cmd==='cancel_git_job') {window.__gitJob={...window.__gitJob,phase:'cancelled',done:true,error:'Операция отменена'};return;}
+        if(cmd==='compare_snapshots') {if(args.baseId!==gitFixture.baseSnapshotId||args.targetId!==gitFixture.targetSnapshotId)throw new Error('No exported comparison for these IDs');return gitFixture.comparison;}
+        if(cmd==='comparison_page') {const rows=gitFixture.changes.items.filter(item=>(!args.category||item.category===args.category)&&(item.label+' '+item.detail).toLowerCase().includes(args.text.toLowerCase()));return {...gitFixture.changes,items:rows.slice(args.offset,args.offset+args.limit),offset:args.offset,matchingCount:rows.length,nextOffset:args.offset+args.limit<rows.length?args.offset+args.limit:null};}
+      }
       if (cmd === 'get_impact') {
         window.__impactCalls.push(args.request);
         const item = impactCases.find(item => key(item.request) === key(args.request));
@@ -169,6 +184,31 @@ try {
     await wait(`document.querySelector('.impact-empty')?.textContent.includes('не найдены потребители')`);
     assert.ok(await evaluate(`document.querySelector('.impact-empty').textContent.includes('не означает')`));
     console.log('PASS: real Rust impact responses, type filters, partial counts, test path, graph roots, multi-root union, file-context action and empty result');
+  }
+  if(fixture.git){
+    await evaluate(`document.querySelectorAll('.main-nav button')[7].click()`);
+    await wait(`document.querySelector('.git-status-table')?.textContent.includes('src/main.ts')`);
+    assert.ok(await evaluate(`document.querySelector('.git-status-table').textContent.includes('untracked.txt')`));
+    await evaluate(`document.querySelector('.git-worktree-action').click()`);
+    await wait(`document.querySelector('.git-job')?.textContent.includes('capturing')`);
+    await evaluate(`document.querySelector('.git-job button').click()`);
+    await wait(`document.querySelector('.git-job')?.textContent.includes('cancelled')`);
+    await evaluate(`document.querySelector('.git-commit-action').click()`);
+    await wait(`document.querySelector('.git-job')?.textContent.includes('complete')`);
+    await evaluate(`(() => {const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;for(const [label,value] of [['Base snapshot',${JSON.stringify(fixture.git.baseSnapshotId)}],['Target snapshot',${JSON.stringify(fixture.git.targetSnapshotId)}]]){const input=document.querySelector('[aria-label="'+label+'"]');setter.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));}})()`);
+    await evaluate(`document.querySelector('.git-compare-action').click()`);
+    await wait(`document.querySelector('.git-comparison-summary')?.textContent.includes('Профили анализаторов сопоставимы')`);
+    await wait(`document.querySelectorAll('.git-changes article').length>0`);
+    await evaluate(`(() => {const select=document.querySelector('[aria-label="Категория изменений"]');select.value='edge';select.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await wait(`document.querySelector('.git-changes')?.textContent.includes('Импорт отсутствует в новом AST')`);
+    const gitShot=await send('Page.captureScreenshot',{format:'png'});await writeFile(join(output,'git.png'),Buffer.from(gitShot.data,'base64'));
+    await evaluate(`document.querySelector('.git-changes article .git-change-actions button').click()`);
+    await wait(`document.querySelector('.snapshot-basis')?.textContent.includes(${JSON.stringify(fixture.git.views[0].result.basis.commitOid)})`);
+    assert.ok(await evaluate(`Boolean(document.querySelector('.graph-workspace'))`));
+    await evaluate(`document.querySelectorAll('.main-nav button')[7].click()`);
+    await wait(`document.querySelector('.git-comparison-summary')`);
+    assert.equal(await evaluate(`document.querySelector('[aria-label="Base snapshot"]').value`),fixture.git.baseSnapshotId);
+    console.log('PASS: real Git status/commit/comparison data, job cancel/complete transport, inventory and historical graph navigation');
   }
   const large = structuredClone(analysis);
   large.diagnostics = Array.from({ length: 125 }, (_, index) => ({ ...analysis.diagnostics[0], id: `large-${index}` }));
