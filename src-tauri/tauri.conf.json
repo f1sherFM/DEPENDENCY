@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "DEPENDENCY",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "identifier": "com.f1sherfm.dependency",
   "build": {
     "frontendDist": "../dist",
@@ -13,10 +13,11 @@
     "windows": [
       {
         "title": "DEPENDENCY",
-        "width": 1520,
-        "height": 960,
-        "minWidth": 1080,
-        "minHeight": 700,
+        "width": 1200,
+        "height": 760,
+        "minWidth": 800,
+        "minHeight": 560,
+        "maximized": true,
         "resizable": true,
         "fullscreen": false
       }

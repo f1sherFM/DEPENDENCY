@@ -1,0 +1,5 @@
+{
+  "analysis": {
+    "exclude": ["src-tauri/tests/fixtures/**"]
+  }
+}

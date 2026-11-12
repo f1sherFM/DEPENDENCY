@@ -74,6 +74,7 @@ Optional `dependency.config.json` at the project root (strict JSON, maximum 64 K
 
 ```json
 {
+  "analysis": { "exclude": ["test/fixtures/**"] },
   "rules": {
     "high-fan-out": { "threshold": 20, "exclude": ["src/generated/**"] },
     "high-fan-in": { "threshold": 30 },
@@ -85,7 +86,7 @@ Optional `dependency.config.json` at the project root (strict JSON, maximum 64 K
 }
 ```
 
-All rules are enabled by default. Unknown fields/rules, invalid patterns and invalid thresholds fail analysis before publishing a snapshot. Exclusions affect findings, not the underlying graph; a cycle is excluded only when every SCC member matches that rule's exclusion. Thresholds apply only to fan-in/out. Disabling coverage diagnostics does not hide coverage gaps from rule eligibility or snapshot metadata.
+All rules are enabled by default. Unknown fields/rules, invalid patterns and invalid thresholds fail analysis before publishing a snapshot. Rule exclusions affect findings, not the underlying graph; a cycle is excluded only when every SCC member matches that rule's exclusion. `analysis.exclude` instead removes matching project-relative paths (forward slashes, glob patterns) from the source/manifest index. Excluded files and their dependencies are absent from the graph; tests are included unless explicitly excluded. The exclusion list is saved in the analysis profile, so different scopes are not presented as compatible architectural comparisons. Changing exclusions reuses unchanged parser caches for remaining files. Thresholds apply only to fan-in/out. Disabling coverage diagnostics does not hide coverage gaps from rule eligibility or snapshot metadata.
 
 Diagnostics can open their complete set of nodes in the graph and return to Problems. Long evidence/member lists and result lists load in batches; graph display limits remain explicit. The engine does not execute the inspected project's code or config.
 

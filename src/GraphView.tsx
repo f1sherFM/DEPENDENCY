@@ -1,53 +1,87 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
-import { ArrowLeft, FileCode2, Folder, Maximize2, Network, Package, PanelRightClose, Search, ZoomIn, ZoomOut } from "lucide-react";
-import type { AnalysisResult, Diagnostic, ImpactGraphScope } from "./types";
+import { ArrowLeft, FileCode2, Folder, Maximize2, Network, Package, PanelRightClose, Save, Search, ZoomIn, ZoomOut } from "lucide-react";
+import type { AnalysisResult, Diagnostic, ImpactGraphScope, SavedGraphState } from "./types";
 import { layoutGraph, projectGraph } from "./graph";
 
-export function GraphView({ analysis, selected, onSelect, searchInput, detailsOpen, setDetailsOpen, diagnostic, onClearDiagnostic, onOpenDiagnostic, impactScope, onOpenImpact }: {
+export function GraphView({ analysis, selected, onSelect, searchInput, detailsOpen, setDetailsOpen, diagnostic, onClearDiagnostic, onOpenDiagnostic, impactScope, onOpenImpact, savedGraph, onSaveResearch, busy }: {
   analysis: AnalysisResult; selected: string | null; onSelect: (id: string) => void;
   searchInput: RefObject<HTMLInputElement | null>; detailsOpen: boolean; setDetailsOpen: (value: boolean) => void;
   diagnostic: Diagnostic | null; onClearDiagnostic: () => void; onOpenDiagnostic: () => void;
   impactScope: ImpactGraphScope | null; onOpenImpact: () => void;
+  savedGraph?: SavedGraphState; onSaveResearch: (graph: SavedGraphState) => void;
+  busy: boolean;
 }) {
-  const [mode, setMode] = useState<"files" | "directories">("directories");
-  const [directory, setDirectory] = useState("");
-  const [query, setQuery] = useState("");
-  const [showPackages, setShowPackages] = useState(true);
-  const [edgeKind, setEdgeKind] = useState("");
-  const [focus, setFocus] = useState<string | null>(null);
-  const [direction, setDirection] = useState<"both" | "incoming" | "outgoing">("both");
+  const [mode, setMode] = useState<"files" | "directories">(savedGraph?.mode ?? "directories");
+  const [directory, setDirectory] = useState(savedGraph?.directory ?? "");
+  const [query, setQuery] = useState(savedGraph?.query ?? "");
+  const [showPackages, setShowPackages] = useState(savedGraph?.showPackages ?? false);
+  const [edgeKind, setEdgeKind] = useState(savedGraph?.edgeKind ?? "");
+  const [focus, setFocus] = useState<string | null>(savedGraph?.focus ?? null);
+  const [direction, setDirection] = useState<"both" | "incoming" | "outgoing">(savedGraph?.direction ?? "both");
   const [camera, setCamera] = useState({ x: 20, y: 20, zoom: 1 });
-  const [viewport, setViewport] = useState({ width: 900, height: 600 });
+  const cameraMode = useRef<"initial" | "manual" | "fit">(savedGraph ? "manual" : "initial");
+  const [viewport, setViewport] = useState({ width: 900, height: 600, ready: false });
+  const [restoring, setRestoring] = useState(Boolean(savedGraph));
+  const restoreCamera = useRef(savedGraph?.camera);
+  const restoreSelection = useRef(savedGraph ? { id: savedGraph.selectedNodeId } : null);
   const canvas = useRef<HTMLDivElement>(null);
   const drag = useRef<{ x: number; y: number; cameraX: number; cameraY: number } | null>(null);
   const view = useMemo(() => projectGraph(analysis.nodes, impactScope?.edges ?? (impactScope ? analysis.edges.filter(edge => impactScope.edgeKinds.includes(edge.kind)) : analysis.edges), {
     mode, directory, query, showPackages, edgeKind, focus, direction, limit: 200, nodeIds: impactScope?.nodeIds ?? diagnostic?.nodeIds, priorityIds: impactScope?.roots,
   }), [analysis, mode, directory, query, showPackages, edgeKind, focus, direction, diagnostic, impactScope]);
   const layout = useMemo(() => layoutGraph(view.nodes, view.edges, focus), [view, focus]);
+  const previousLayout = useRef(layout);
   const kinds = useMemo(() => [...new Set(analysis.edges.map(edge => edge.kind))].sort(), [analysis]);
   const selectedNode = analysis.nodes.find(node => node.id === selected);
-  const fit = () => {
-    const zoom = Math.max(0.02, Math.min(1.4, (viewport.width - 40) / layout.width, (viewport.height - 40) / layout.height));
-    setCamera({ zoom, x: (viewport.width - layout.width * zoom) / 2, y: (viewport.height - layout.height * zoom) / 2 });
+  const automaticCamera = (fitAll: boolean) => {
+    const zoom = Math.max(fitAll ? 0.02 : 1, Math.min(1.4, (viewport.width - 40) / layout.width, (viewport.height - 40) / layout.height));
+    if (fitAll) return { zoom, x: (viewport.width - layout.width * zoom) / 2, y: (viewport.height - layout.height * zoom) / 2 };
+    const target = focus ? layout.positions.get(focus) : null;
+    return { zoom,
+      x: target ? viewport.width / 2 - (target.x + 95) * zoom : Math.max(20, (viewport.width - layout.width * zoom) / 2),
+      y: target ? viewport.height / 2 - (target.y + 30) * zoom : Math.max(20, (viewport.height - layout.height * zoom) / 2) };
   };
+  const fit = () => { cameraMode.current = "fit"; setCamera(automaticCamera(true)); };
   useEffect(() => {
     if (!canvas.current) return;
-    const observer = new ResizeObserver(([entry]) => setViewport({ width: entry.contentRect.width, height: entry.contentRect.height }));
+    const observer = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect;
+      if (width > 0 && height > 0) setViewport(previous => previous.ready && previous.width === width && previous.height === height ? previous : { width, height, ready: true });
+    });
     observer.observe(canvas.current); return () => observer.disconnect();
   }, []);
-  useEffect(() => { fit(); }, [layout, viewport.width, viewport.height]);
   useEffect(() => {
+    if (!viewport.ready) return;
+    if (restoreCamera.current) {
+      const saved = restoreCamera.current; restoreCamera.current = undefined;
+      cameraMode.current = "manual"; previousLayout.current = layout;
+      setCamera({ zoom: saved.zoom, x: viewport.width / 2 - saved.centerX * saved.zoom, y: viewport.height / 2 - saved.centerY * saved.zoom });
+      setRestoring(false); return;
+    }
+    // A new graph gets a readable initial camera. Canvas reflow must respect
+    // the user's zoom/pan or keep an explicitly requested fit, never reset it.
+    if (previousLayout.current !== layout) { previousLayout.current = layout; cameraMode.current = "initial"; }
+    if (cameraMode.current !== "manual") setCamera(automaticCamera(cameraMode.current === "fit"));
+  }, [layout, viewport.width, viewport.height, viewport.ready, focus]);
+  useEffect(() => {
+    if (restoreSelection.current) {
+      if (!diagnostic && !impactScope && selected === restoreSelection.current.id) return;
+      restoreSelection.current = null;
+    }
     if (diagnostic || impactScope) { setMode("files"); setDirectory(""); setQuery(""); setEdgeKind(""); setShowPackages(true); setFocus(null); return; }
     if (!selected) return;
     // A jump from the context panel must reveal its target, even across filters.
     setMode("files"); setDirectory(""); setQuery(""); setShowPackages(true); setFocus(selected);
   }, [selected, diagnostic, impactScope]);
-  const zoomAt = (factor: number, x = viewport.width / 2, y = viewport.height / 2) => setCamera(previous => {
-    const zoom = Math.max(0.02, Math.min(3, previous.zoom * factor));
-    return { zoom, x: x - (x - previous.x) * zoom / previous.zoom, y: y - (y - previous.y) * zoom / previous.zoom };
-  });
-  const reset = () => { onClearDiagnostic(); setMode("directories"); setDirectory(""); setQuery(""); setEdgeKind(""); setFocus(null); setShowPackages(true); onSelect(""); };
+  const zoomAt = (factor: number, x = viewport.width / 2, y = viewport.height / 2) => {
+    cameraMode.current = "manual";
+    setCamera(previous => {
+      const zoom = Math.max(0.02, Math.min(3, previous.zoom * factor));
+      return { zoom, x: x - (x - previous.x) * zoom / previous.zoom, y: y - (y - previous.y) * zoom / previous.zoom };
+    });
+  };
+  const reset = () => { onClearDiagnostic(); setMode("directories"); setDirectory(""); setQuery(""); setEdgeKind(""); setFocus(null); setShowPackages(false); onSelect(""); };
   return <div className="graph-workspace">
     {impactScope && <div className="graph-navigation impact-graph-context"><b>{impactScope.title}</b><span>Выборка: {impactScope.shownAffectedCount} потребителей из {impactScope.partial ? "не менее " : ""}{impactScope.knownAffectedCount}. {impactScope.partial && "Обход неполный."} Корни выделены зелёным.</span><button onClick={onOpenImpact}>К анализу влияния</button><button onClick={reset}>Весь проект</button></div>}
     {diagnostic && <div className="graph-navigation"><b>{diagnostic.title}</b><code>{diagnostic.ruleId}</code><button onClick={onOpenDiagnostic}>К диагностике</button><button onClick={reset}>Весь проект</button></div>}
@@ -61,6 +95,7 @@ export function GraphView({ analysis, selected, onSelect, searchInput, detailsOp
     </div></div>
     <div className="graph-navigation"><button onClick={reset}>Весь проект</button>{directory && <><span>/ {directory}</span><button onClick={() => setDirectory(directory.split("/").slice(0, -1).join("/"))}><ArrowLeft size={13} />Выше</button></>}
       <button disabled={!selectedNode} onClick={() => { setFocus(selected); setMode("files"); setDirectory(""); setQuery(""); }}>Окружение узла</button>
+      <button disabled={busy || Boolean(diagnostic || impactScope) || restoring || !viewport.ready} title={diagnostic || impactScope ? "Сохранение доступно в обычном графе. Перейдите во «Весь проект»." : "Сохранить заметку и состояние этого графа на текущем снимке"} onClick={() => onSaveResearch({ mode, directory, query, showPackages, edgeKind, focus, direction, selectedNodeId: selected, detailsOpen, camera: { centerX: (viewport.width / 2 - camera.x) / camera.zoom, centerY: (viewport.height / 2 - camera.y) / camera.zoom, zoom: camera.zoom } })}><Save size={13} />Сохранить исследование</button>
       {focus && <><select aria-label="Направление связей" value={direction} onChange={event => setDirection(event.target.value as typeof direction)}><option value="both">Входящие и исходящие</option><option value="incoming">Кто импортирует</option><option value="outgoing">Что импортирует</option></select><button onClick={() => setFocus(null)}>Убрать фокус</button></>}
     </div>
     <div className="graph-canvas interactive-canvas" ref={canvas} onWheel={event => {
@@ -69,7 +104,7 @@ export function GraphView({ analysis, selected, onSelect, searchInput, detailsOp
       if (event.button !== 0 || (event.target as Element).closest(".graph-node")) return;
       event.currentTarget.setPointerCapture(event.pointerId); drag.current = { x: event.clientX, y: event.clientY, cameraX: camera.x, cameraY: camera.y };
     }} onPointerMove={event => {
-      if (drag.current) { const start = drag.current; setCamera(previous => ({ ...previous, x: start.cameraX + event.clientX - start.x, y: start.cameraY + event.clientY - start.y })); }
+      if (drag.current) { cameraMode.current = "manual"; const start = drag.current; setCamera(previous => ({ ...previous, x: start.cameraX + event.clientX - start.x, y: start.cameraY + event.clientY - start.y })); }
     }} onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }}>
       <svg width="100%" height="100%" role="group" aria-label="Интерактивный граф зависимостей">
         <defs><marker id="graph-arrow" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#8b9abb" /></marker></defs>
@@ -83,7 +118,7 @@ export function GraphView({ analysis, selected, onSelect, searchInput, detailsOp
           })}
           {view.nodes.map(node => { const p = layout.positions.get(node.id)!; const Icon = node.kind === "directory" ? Folder : node.kind === "package" ? Package : FileCode2;
             const activate = () => { if (node.kind === "directory") { setDirectory(node.path); setFocus(null); } else onSelect(node.id); };
-            return <g key={node.id} role="button" aria-label={`${node.kind === "directory" ? "Открыть каталог" : "Выбрать"} ${node.path}`} className={`graph-node ${node.kind} ${diagnostic || impactScope ? "diagnostic-member" : ""} ${impactScope?.roots.some(root => node.members.includes(root)) ? "impact-root" : ""} ${selected === node.id ? "selected" : ""}`} transform={`translate(${p.x},${p.y})`} onClick={activate} tabIndex={0} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(); } }}>
+            return <g key={node.id} data-node-id={node.id} role="button" aria-label={`${node.kind === "directory" ? "Открыть каталог" : "Выбрать"} ${node.path}`} className={`graph-node ${node.kind} ${diagnostic || impactScope ? "diagnostic-member" : ""} ${impactScope?.roots.some(root => node.members.includes(root)) ? "impact-root" : ""} ${selected === node.id ? "selected" : ""}`} transform={`translate(${p.x},${p.y})`} onClick={activate} tabIndex={0} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(); } }}>
               <title>{node.path}{node.kind === "directory" ? ` · ${node.members.length} файлов. Нажмите для раскрытия.` : ""}</title><rect width="190" height="60" rx="10" /><Icon x={12} y={20} size={18} /><text x="40" y="25" className="node-label">{node.label.length > 21 ? `${node.label.slice(0, 20)}…` : node.label}</text><text x="40" y="44" className="node-caption">{node.kind === "directory" ? `${node.members.length} файлов` : node.kind === "package" ? "Внешний пакет" : node.language ?? "Ресурс"} · ↓{node.incoming} ↑{node.outgoing}</text>
             </g>;
           })}
@@ -92,6 +127,8 @@ export function GraphView({ analysis, selected, onSelect, searchInput, detailsOp
       {!view.nodes.length && <div className="empty-graph"><Search size={20} /><b>Узлы не найдены</b><span>Измените поиск, каталог или фильтры.</span><button onClick={reset}>Сбросить фильтры</button></div>}
     </div>
     <div className="graph-coverage" role="status">{view.nodes.length} из {view.totalNodes} узлов выборки · {view.edges.reduce((sum, edge) => sum + edge.count, 0)} импортов · {view.edges.length} стрелок
+      {!showPackages && <span> · Внешние пакеты скрыты переключателем «Пакеты».</span>}
+      {(layout.width * camera.zoom > viewport.width || layout.height * camera.zoom > viewport.height) && <span> · Часть графа за пределами экрана: перетащите фон или нажмите «Вписать граф».</span>}
       {(view.hiddenNodes > 0 || view.hiddenEdges > 0) && <b> · Скрыто: {view.hiddenNodes} узлов, {view.hiddenEdges} импортов. Уточните поиск или раскройте каталог.</b>}
       {view.internalEdges > 0 && <span> · {view.internalEdges} импортов внутри свёрнутых каталогов</span>}
       {view.boundaryEdges > 0 && <span> · {view.boundaryEdges} связей за границами представления</span>}

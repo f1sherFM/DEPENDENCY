@@ -1,5 +1,5 @@
-use crate::analysis::ImportDecl;
 use crate::language::SourceLanguage;
+use crate::parse_facts::ImportDecl;
 use tree_sitter::{Node, Parser};
 
 pub(crate) fn parse_imports(

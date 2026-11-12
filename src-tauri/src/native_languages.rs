@@ -1,38 +1,9 @@
 //! Data-only language facts. Project discovery and resolution never execute code.
-use crate::{analysis::ImportDecl, language::SourceLanguage};
-use serde::{Deserialize, Serialize};
+use crate::{
+    language::SourceLanguage,
+    parse_facts::{Fact, ImportDecl},
+};
 use tree_sitter::{Node, Parser};
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum Fact {
-    RustItem {
-        context: Vec<String>,
-        name: String,
-        conditional: bool,
-    },
-    Python {
-        module: String,
-        names: Vec<String>,
-        relative: usize,
-        conditional: bool,
-    },
-    RustModule {
-        context: Vec<String>,
-        name: String,
-        path: Option<String>,
-        inline: bool,
-        conditional: bool,
-    },
-    RustUse {
-        context: Vec<String>,
-        path: String,
-        conditional: bool,
-    },
-    Gap {
-        reason: String,
-    },
-}
 
 fn text<'a>(node: Node, source: &'a str) -> &'a str {
     node.utf8_text(source.as_bytes()).unwrap_or("")

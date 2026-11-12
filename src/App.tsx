@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { GraphView } from "./GraphView";
+import { useAgentObservation } from "./agentObservation";
+import { InvestigationDialog, InvestigationsView } from "./InvestigationsView";
+import type { InvestigationDraft } from "./InvestigationsView";
 import { ProblemsView } from "./ProblemsView";
 import { ImpactView } from "./ImpactView";
 import { GitView } from "./GitView";
@@ -12,9 +15,9 @@ import {
   Plus, RefreshCw, XCircle, Settings2, Share2, ShieldCheck, Sparkles, Unplug,
 
 } from "lucide-react";
-import type { AnalysisResult, Diagnostic, GraphNode, ImpactGraphScope, ProjectRecord, ProjectView, SnapshotRecord, GitJob } from "./types";
+import type { AnalysisResult, Diagnostic, GraphNode, ImpactGraphScope, ProjectRecord, ProjectView, SnapshotRecord, GitJob, Investigation, SavedGraphState } from "./types";
 
-type View = "overview" | "graph" | "modules" | "packages" | "problems" | "history" | "impact" | "git";
+type View = "overview" | "graph" | "modules" | "packages" | "problems" | "history" | "impact" | "git" | "investigations";
 const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "overview", label: "Обзор", icon: LayoutDashboard },
   { id: "graph", label: "Зависимости", icon: Network },
@@ -24,6 +27,7 @@ const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "history", label: "Снимки", icon: Clock3 },
   { id: "impact", label: "Анализ влияния", icon: Share2 },
   { id: "git", label: "Git и сравнение", icon: Code2 },
+  { id: "investigations", label: "Исследования", icon: Folder },
 ];
 
 function App() {
@@ -38,11 +42,24 @@ function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [detailsOpen, setDetailsOpen] = useState(true);
+  const [detailsOpen, setDetailsOpen] = useState(() => window.innerWidth > 1080);
   const [gitVisited, setGitVisited] = useState(false);
   const [gitJobId, setGitJobId] = useState<string | null>(null);
+  const [graphRestore,setGraphRestore]=useState<{key:string;graph:SavedGraphState}|null>(null);
+  const [activeInvestigation,setActiveInvestigation]=useState<Investigation|null>(null);
+  const [researchDraft,setResearchDraft]=useState<InvestigationDraft|null>(null);
+  const [researchRevision,setResearchRevision]=useState(0);
+  const agentStatus = useAgentObservation({ projectId: currentProject?.project.id ?? null, snapshotId: currentProject?.snapshot.id ?? null, view, selectedNodeId: selected, busy });
   const navigationGeneration = useRef(0);
   const graphSearch = useRef<HTMLInputElement>(null);
+  const mainContent = useRef<HTMLElement>(null);
+  useEffect(() => { mainContent.current?.scrollTo(0, 0); }, [view, currentProject?.snapshot.id]);
+  useEffect(() => {
+    const narrow = window.matchMedia("(max-width: 1080px)");
+    const onResize = () => { if (narrow.matches) setDetailsOpen(false); };
+    narrow.addEventListener("change", onResize);
+    return () => narrow.removeEventListener("change", onResize);
+  }, []);
 
   const refreshProjects = async () => setProjects(await invoke<ProjectRecord[]>("list_projects"));
   useEffect(() => {
@@ -64,6 +81,7 @@ function App() {
   }, [currentProject?.project.id, currentProject?.snapshot.id]);
 
   const showProject = (project: ProjectView) => {
+    setGraphRestore(null);setActiveInvestigation(null);setResearchDraft(null);
     if (currentProject?.project.id !== project.project.id) setGitVisited(false);
     setCurrentProject(project); setAnalysis(project.result); setGraphDiagnostic(null); setImpactScope(null); setImpactRoots([]); setSelected(null); setView("overview");
     void refreshProjects().catch(() => {});
@@ -83,14 +101,14 @@ function App() {
     if (busy) return;
     const token = ++navigationGeneration.current;
     let root = path;
-    if (!root) {
-      const choice = await open({ directory: true, multiple: false, title: "Выберите папку проекта" });
-      if (!choice || Array.isArray(choice)) return;
-      root = choice;
-    }
-    if (token !== navigationGeneration.current) return;
     setBusy(true); setError(null);
     try {
+      if (!root) {
+        const choice = await open({ directory: true, multiple: false, title: "Выберите папку проекта" });
+        if (!choice || Array.isArray(choice)) return;
+        root = choice;
+      }
+      if (token !== navigationGeneration.current) return;
       if (!force) {
         const saved = await invoke<ProjectView | null>("open_project", { root });
         if (saved) { if (token === navigationGeneration.current) showProject(saved); return; }
@@ -141,6 +159,33 @@ function App() {
     setView(impact && nodeId ? "impact" : "graph");
   };
   const selectedNode = analysis?.nodes.find((node) => node.id === selected) ?? null;
+  const detachResearch=()=>{setActiveInvestigation(null);setGraphRestore(null);};
+
+  const openResearch=async(id:string,edit=false)=>{
+    if(busy||!currentProject)return;
+    const token=++navigationGeneration.current;setBusy(true);setError(null);
+    try{
+      const saved=await invoke<Investigation>("load_investigation",{id});
+      if(token!==navigationGeneration.current)return;
+      if(saved.projectId!==currentProject.project.id)throw new Error("Исследование относится к другому проекту");
+      if(edit){setResearchDraft({snapshotId:saved.snapshotId,graph:saved.graph,existing:saved});return;}
+      const project=await invoke<ProjectView>("load_snapshot",{snapshotId:saved.snapshotId});
+      if(token!==navigationGeneration.current)return;
+      showProject(project);setSelected(saved.graph.selectedNodeId);setDetailsOpen(saved.graph.detailsOpen);
+      setGraphRestore({key:crypto.randomUUID(),graph:saved.graph});setActiveInvestigation(saved);setView("graph");
+    }catch(reason){if(token===navigationGeneration.current)setError(String(reason));}
+    finally{if(token===navigationGeneration.current){setBusy(false);setGitJobId(null);}}
+  };
+  const saveResearchGraph=(graph:SavedGraphState)=>{
+    if(!currentProject||busy)return;
+    setResearchDraft({snapshotId:currentProject.snapshot.id,graph,existing:activeInvestigation?.snapshotId===currentProject.snapshot.id?activeInvestigation:undefined});
+  };
+  const researchSaved=(saved:Investigation)=>{
+    setResearchDraft(null);setResearchRevision(revision=>revision+1);
+    if(view==="graph"&&saved.snapshotId===currentProject?.snapshot.id){
+      setActiveInvestigation(saved);setGraphRestore({key:crypto.randomUUID(),graph:saved.graph});
+    }else if(activeInvestigation?.id===saved.id)setActiveInvestigation(saved);
+  };
 
   return (
     <div className="app-shell">
@@ -153,23 +198,24 @@ function App() {
           <span className="top-project-name">{analysis?.summary.name ?? "Проект не выбран"}</span>
         </div>
         <div className="top-actions">
+          {agentStatus !== "off" && <span className="agent-badge" title="Локальное наблюдение для CLI/MCP. Изменение проектов через этот канал недоступно.">{agentStatus === "active" ? "Агент · чтение" : "Агент · нет связи"}</span>}
           {analysis && <span className="local-badge"><ShieldCheck size={13} /> Локальный анализ</span>}
-          <button className="icon-button" title="Настройки" aria-label="Настройки"><Settings2 size={18} /></button>
+          <button className="icon-button" disabled title="Настройки пока недоступны" aria-label="Настройки пока недоступны"><Settings2 size={18} /></button>
           <div className="avatar">D</div>
         </div>
       </header>
 
       <aside className="sidebar">
-        <div className="sidebar-project">
-          <div className="sidebar-project-icon"><FolderOpen size={17} /></div>
-          <div className="sidebar-project-copy"><b>{analysis?.summary.name ?? "Ваш проект"}</b><span>{analysis?.summary.rootPath ?? "Выберите локальный репозиторий"}</span></div>
+        <button type="button" className="sidebar-project" disabled={busy} onClick={() => void scan()} aria-label="Открыть другой проект" title="Открыть другой проект">
+          <span className="sidebar-project-icon"><FolderOpen size={17} /></span>
+          <span className="sidebar-project-copy"><b>{analysis?.summary.name ?? "Ваш проект"}</b><span>{analysis?.summary.rootPath ?? "Выберите локальный репозиторий"}</span></span>
           <ChevronDown size={15} className="muted" />
-        </div>
+        </button>
         <div className="sidebar-caption">ПРОЕКТ</div>
         <nav className="main-nav" aria-label="Разделы проекта">
           {navItems.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${view === id ? "active" : ""}`} onClick={() => { if (id === "git") setGitVisited(true); setView(id); }}>
             <Icon size={18} strokeWidth={1.8} /><span>{label}</span>
-            {analysis && <span className="nav-count">{id === "graph" ? analysis.summary.dependencyCount : id === "modules" ? analysis.summary.moduleCount : id === "packages" ? analysis.summary.externalPackageCount : id === "problems" ? (analysis.rulesRun ? analysis.diagnostics.filter(item => item.severity !== "info").length : analysis.summary.cycleCount + analysis.summary.unresolvedCount + analysis.summary.ambiguousCount + analysis.summary.parseErrorCount) : ""}</span>}
+            {analysis && <span className="nav-count" title={id === "problems" ? "Архитектурные предупреждения. Ограничения анализа показаны отдельно в разделе." : undefined}>{id === "graph" ? analysis.summary.dependencyCount : id === "modules" ? analysis.summary.moduleCount : id === "packages" ? analysis.summary.externalPackageCount : id === "problems" ? (analysis.rulesRun ? analysis.diagnostics.filter(item => item.category === "architecture" && item.severity !== "info").length : analysis.summary.cycleCount) : ""}</span>}
           </button>)}
         </nav>
         <div className="sidebar-caption recent-caption">СОХРАНЁННЫЕ ПРОЕКТЫ</div>
@@ -178,30 +224,32 @@ function App() {
         <div className="sidebar-caption">БЫСТРЫЕ ДЕЙСТВИЯ</div>
         <button className="quick-action" onClick={() => void scan()}><Plus size={17} /> Открыть проект</button>
         <button className="quick-action" disabled={!analysis || busy} onClick={() => analysis && void scan(analysis.summary.rootPath, true)}><RefreshCw size={16} className={busy ? "spin" : ""} /> Пересканировать</button>
-        <div className="sidebar-bottom"><span className="engine-status"><i /> Engine готов</span><span className="version">v0.8.0</span></div>
+        <div className="sidebar-bottom"><span className="engine-status"><i /> Engine готов</span><span className="version">v0.9.0</span></div>
       </aside>
 
-      <main className={`main-content ${analysis && view === "graph" && detailsOpen ? "with-details" : "without-details"}`}>
+      <main ref={mainContent} className={`main-content ${view === "graph" ? "graph-page" : ""} ${analysis && view === "graph" && detailsOpen ? "with-details" : "without-details"}`}>
         {gitJobId && <button className="text-button" onClick={() => void invoke("cancel_git_job", { jobId: gitJobId }).catch(reason => setError(String(reason)))}>Отменить Git-анализ</button>}
         {!analysis ? <Welcome busy={busy} error={error} onOpen={() => void scan()} /> : <>
           <div className="page-heading">
             <div><div className="eyebrow"><span className="crumb">{analysis.summary.name}</span><ArrowRight size={12} /><span>{navItems.find((item) => item.id === view)?.label}</span></div>
-              <h1>{view === "overview" ? "Обзор проекта" : view === "graph" ? "Граф зависимостей" : view === "modules" ? "Модули проекта" : view === "packages" ? "Внешние пакеты" : view === "history" ? "История снимков" : view === "impact" ? "Анализ влияния" : view === "git" ? "Git и сравнение архитектуры" : "Проблемы анализа"}</h1>
-              <p className="subheading">{view === "overview" ? "Структура и связи, обнаруженные в выбранном репозитории." : `${analysis.summary.rootPath}`}</p>
+              <h1>{view === "overview" ? "Обзор проекта" : view === "graph" ? "Граф зависимостей" : view === "modules" ? "Модули проекта" : view === "packages" ? "Внешние пакеты" : view === "history" ? "История снимков" : view === "impact" ? "Анализ влияния" : view === "git" ? "Git и сравнение архитектуры" : view === "investigations" ? "Исследования проекта" : "Проблемы анализа"}</h1>
+              <p className="subheading" title={analysis.summary.rootPath}>{view === "overview" ? "Структура и связи, обнаруженные в выбранном репозитории." : `${analysis.summary.rootPath}`}</p>
             </div>
             <button className="primary-button" disabled={busy} onClick={() => void scan(analysis.summary.rootPath, true)}>{busy ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{busy ? "Анализируем…" : "Запустить анализ"}</button>
           </div>
           {analysis.analysisProfile && <details className="panel analysis-profile"><summary>Профиль анализа · {Object.keys(analysis.analysisProfile.analyzers).join(", ")}</summary>{analysis.analysisProfile.limitations.map(text=><p key={text}>{text}</p>)}{analysis.analysisProfile.analyzers.Python && <p>Python source roots: {analysis.analysisProfile.pythonRoots.map(root=>root||"корень").join(", ")}</p>}<p>Rust mod обозначает структуру, use — зависимость. Условные импорты не доказывают выполнение.</p></details>}
-          {analysis.basis && <div className="snapshot-basis"><b>{analysis.basis.kind}</b> · {analysis.basis.commitOid ?? analysis.basis.observedHeadOid ?? "unborn HEAD"} · {analysis.basis.resolutionProfile} · {analysis.basis.captureConsistency}</div>}
+          {analysis.basis && <details className="snapshot-basis"><summary>Источник снимка · {analysis.basis.kind === "git-worktree" ? "Рабочая копия Git" : analysis.basis.kind === "git-commit" ? "Коммит Git" : analysis.basis.kind}</summary><p><b>{analysis.basis.kind}</b> · {analysis.basis.commitOid ?? analysis.basis.observedHeadOid ?? "unborn HEAD"} · {analysis.basis.resolutionProfile} · {analysis.basis.captureConsistency}</p></details>}
           {error && <div className="error-banner"><AlertTriangle size={16} />{error}<button onClick={() => setError(null)}><XCircle size={15} /></button></div>}
-          {view === "overview" && <Overview analysis={analysis} onOpenGraph={() => setView("graph")} onSelect={setSelected} />}
-          {view === "graph" && <GraphView key={currentProject?.snapshot.id} analysis={analysis} selected={selected} onSelect={selectNode} searchInput={graphSearch} detailsOpen={detailsOpen} setDetailsOpen={setDetailsOpen} diagnostic={graphDiagnostic} onClearDiagnostic={() => { setGraphDiagnostic(null); setImpactScope(null); }} impactScope={impactScope} onOpenImpact={() => setView("impact")} onOpenDiagnostic={() => setView("problems")} />}
-          {view === "modules" && <ModulesView analysis={analysis} onSelect={(id) => { selectNode(id); setView("graph"); }} />}
+          {view === "overview" && <Overview analysis={analysis} onOpenGraph={() => {detachResearch();setView("graph");}} onSelect={id => { detachResearch();setGraphDiagnostic(null); setImpactScope(null); setSelected(id); setView("graph"); }} />}
+          {view === "graph" && activeInvestigation && <div className="graph-navigation research-context"><b>Исследование: {activeInvestigation.name}</b><span>Сохранённый снимок {activeInvestigation.snapshotId.slice(0,8)}</span><button onClick={()=>setView("investigations")}>К исследованиям</button><button onClick={()=>{detachResearch();setSelected(null);setGraphDiagnostic(null);setImpactScope(null);}}>Закрыть исследование</button></div>}
+          {view === "graph" && <GraphView key={`${currentProject?.snapshot.id}:${graphRestore?.key??"default"}`} analysis={analysis} selected={selected} onSelect={selectNode} searchInput={graphSearch} detailsOpen={detailsOpen} setDetailsOpen={setDetailsOpen} diagnostic={graphDiagnostic} onClearDiagnostic={() => { setGraphDiagnostic(null); setImpactScope(null); }} impactScope={impactScope} onOpenImpact={() => setView("impact")} onOpenDiagnostic={() => setView("problems")} savedGraph={graphRestore?.graph} onSaveResearch={saveResearchGraph} busy={busy} />}
+          {view === "investigations" && currentProject && <InvestigationsView key={currentProject.project.id} projectId={currentProject.project.id} currentSnapshotId={currentProject.snapshot.id} revision={researchRevision} busy={busy} onOpen={id=>void openResearch(id)} onEdit={id=>void openResearch(id,true)} onDeleted={id=>{if(activeInvestigation?.id===id){detachResearch();setSelected(null);}}} />}
+          {view === "modules" && <ModulesView analysis={analysis} onSelect={(id) => { detachResearch();selectNode(id); setView("graph"); }} />}
           {view === "packages" && <PackagesView analysis={analysis} />}
-          {view === "problems" && <ProblemsView key={currentProject?.snapshot.id} activeDiagnosticId={graphDiagnostic?.id} analysis={analysis} onShowGraph={(diagnostic) => { setImpactScope(null); setGraphDiagnostic(diagnostic); setSelected(null); setView("graph"); }} onSelect={(id) => { selectNode(id); setView("graph"); }} />}
+          {view === "problems" && <ProblemsView key={currentProject?.snapshot.id} activeDiagnosticId={graphDiagnostic?.id} analysis={analysis} onShowGraph={(diagnostic) => { detachResearch();setImpactScope(null); setGraphDiagnostic(diagnostic); setSelected(null); setView("graph"); }} onSelect={(id) => { detachResearch();selectNode(id); setView("graph"); }} />}
           {view === "history" && <HistoryView snapshots={snapshots} current={currentProject?.snapshot.id ?? ""} onOpen={openSnapshot} />}
           {currentProject && (gitVisited || view === "git") && <div hidden={view !== "git"}><GitView key={currentProject.project.id} root={analysis.summary.rootPath} projectId={currentProject.project.id} snapshot={currentProject.snapshot} analysis={analysis} externalBusy={busy} onOpen={openGitSnapshot} /></div>}
-          {currentProject && <div hidden={view !== "impact"}><ImpactView key={currentProject.snapshot.id} analysis={analysis} snapshot={currentProject.snapshot} initialRoots={impactRoots} onGraph={(scope) => { setImpactScope(scope); setGraphDiagnostic(null); setSelected(null); setView("graph"); }} /></div>}
+          {currentProject && <div hidden={view !== "impact"}><ImpactView key={currentProject.snapshot.id} analysis={analysis} snapshot={currentProject.snapshot} initialRoots={impactRoots} onGraph={(scope) => { detachResearch();setImpactScope(scope); setGraphDiagnostic(null); setSelected(null); setView("graph"); }} /></div>}
           <div className="status-line"><span><ShieldCheck size={13} /> Исходный код не запускается</span><span><Clock3 size={13} /> Снимок {formatDate(currentProject?.snapshot.createdAt ?? 0)} · анализатор {currentProject?.snapshot.analyzerVersion ?? "—"}</span></div>
         </>}
       </main>
@@ -213,6 +261,7 @@ function App() {
           <div className="detail-section"><div className="detail-section-title">ЯЗЫКИ</div>{analysis.summary.languages.map((language) => <div className="language-row" key={language.name}><span><i className="language-dot" />{language.name}</span><b>{language.count}</b></div>)}</div>
         </>}
       </aside>}
+      {researchDraft&&<InvestigationDialog draft={researchDraft} onClose={()=>setResearchDraft(null)} onSaved={researchSaved}/>}
     </div>
   );
 }
@@ -245,7 +294,7 @@ function StatCard({ icon: Icon, label, value, tone, meta }: { icon: typeof FileC
 
 function MiniGraph({ analysis, onSelect }: { analysis: AnalysisResult; onSelect: (id: string) => void }) {
   const files = analysis.nodes.filter((n) => n.kind === "file").slice(0, 36);
-  const width = 720; const height = 260; const cols = 6; const pos = new Map(files.map((n, i) => [n.id, { x: 45 + (i % cols) * 124, y: 36 + Math.floor(i / cols) * 44 }]));
+  const width = 780; const height = 310; const cols = 6; const pos = new Map(files.map((n, i) => [n.id, { x: 45 + (i % cols) * 124, y: 36 + Math.floor(i / cols) * 44 }]));
   const shown = new Set(files.map((n) => n.id));
   return <div className="mini-graph"><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Предпросмотр графа файлов">
     {analysis.edges.filter((e) => e.kind !== "package" && shown.has(e.source) && shown.has(e.target)).slice(0, 90).map((e) => { const a = pos.get(e.source)!; const b = pos.get(e.target)!; return <path key={e.id} d={`M ${a.x + 70} ${a.y + 14} C ${(a.x + b.x) / 2} ${a.y + 14}, ${(a.x + b.x) / 2} ${b.y + 14}, ${b.x} ${b.y + 14}`} className="mini-edge" />; })}

@@ -194,9 +194,15 @@ impl Index {
         let state = if let Some(run) = &result.rules_run {
             if run.coverage_issue_count > 0 {
                 reasons.push(format!(
-                    "Снимок содержит {} проблем покрытия",
+                    "Снимок содержит {} записей о неполном покрытии анализа, включая повторяющиеся ограничения анализатора",
                     run.coverage_issue_count
                 ));
+                "known-gaps"
+            } else if result
+                .analysis_profile
+                .as_ref()
+                .is_some_and(|profile| !profile.limitations.is_empty())
+            {
                 "known-gaps"
             } else {
                 "no-recorded-gaps"
@@ -1077,7 +1083,14 @@ mod tests {
             .as_mut()
             .unwrap()
             .coverage_issue_count = 2;
+        let rules_run = output.result.rules_run.clone();
         let index = Index::build(snapshot(), output.result, 0).unwrap();
+        assert_eq!(index.coverage.state, "known-gaps");
+        let mut native = result(&["a"], vec![]);
+        native.rules_run = rules_run;
+        native.analysis_profile = Some(crate::language::profile(&["Python"], &[]));
+        native.rules_run.as_mut().unwrap().coverage_issue_count = 0;
+        let index = Index::build(snapshot(), native, 0).unwrap();
         assert_eq!(index.coverage.state, "known-gaps");
         let mut old = snapshot();
         old.analyzer_version = "js-ts-parser-1".into();

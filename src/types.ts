@@ -11,6 +11,14 @@ export type GraphNode = {
   lines: number; incoming: number; outgoing: number; declared: boolean | null;
 };
 export type GraphEdge = { id: string; source: string; target: string; kind: string; line: number };
+export type SavedGraphState = {
+  mode: "files" | "directories"; directory: string; query: string; showPackages: boolean; edgeKind: string;
+  focus: string | null; direction: "both" | "incoming" | "outgoing"; selectedNodeId: string | null;
+  camera: { centerX: number; centerY: number; zoom: number }; detailsOpen: boolean;
+};
+export type InvestigationMetadata = { id: string; projectId: string; snapshotId: string; name: string; notePreview: string; stateVersion: number; revision: number; createdAt: number; updatedAt: number };
+export type Investigation = InvestigationMetadata & { note: string; graph: SavedGraphState };
+export type InvestigationPage = { items: InvestigationMetadata[]; total: number; nextOffset: number | null };
 export type RuleConfig = { enabled: boolean; exclude: string[]; threshold: number | null };
 export type RulesRun = {
   version: string; configHash: string; effectiveConfig: { rules: Record<string, RuleConfig> };
@@ -29,7 +37,7 @@ export type Diagnostic = {
   nodeIds: string[]; evidence: DiagnosticEvidence;
 };
 export type AnalysisResult = {
-  analysisProfile?: { graphSemantics: string; analyzers: Record<string,[string,string]>; pythonRoots: string[]; limitations: string[] } | null; basis?: SnapshotBasis | null; summary: ProjectSummary; nodes: GraphNode[]; edges: GraphEdge[]; diagnostics: Diagnostic[]; rulesRun: RulesRun | null };
+  analysisProfile?: { graphSemantics: string; analyzers: Record<string,[string,string]>; pythonRoots: string[]; excludedPaths?: string[]; limitations: string[] } | null; basis?: SnapshotBasis | null; summary: ProjectSummary; nodes: GraphNode[]; edges: GraphEdge[]; diagnostics: Diagnostic[]; rulesRun: RulesRun | null };
 export type ProjectRecord = { id: string; name: string; rootPath: string; lastOpenedAt: number; latestSnapshotId: string | null; latestSnapshotAt: number | null };
 export type SnapshotRecord = { basis?: SnapshotBasis | null; id: string; projectId: string; createdAt: number; analyzerVersion: string; rulesVersion: string; parsedFileCount: number; reusedFileCount: number };
 export type ProjectView = { project: ProjectRecord; snapshot: SnapshotRecord; result: AnalysisResult };

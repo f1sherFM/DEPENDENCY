@@ -1,5 +1,6 @@
 use crate::js_ts::parse_imports;
 use crate::language::{SourceLanguage, language_for};
+use crate::parse_facts::ImportDecl;
 use globset::{Glob, GlobSetBuilder};
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
@@ -114,7 +115,7 @@ struct SourceFile {
 #[serde(rename_all = "camelCase")]
 pub struct CachedImport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub facts: Option<crate::native_languages::Fact>,
+    pub facts: Option<crate::parse_facts::Fact>,
     pub specifier: String,
     pub kind: String,
     pub line: usize,
@@ -137,14 +138,6 @@ pub struct AnalysisOutput {
     pub file_cache: Vec<ParsedFileCache>,
     pub parsed_file_count: usize,
     pub reused_file_count: usize,
-}
-
-#[derive(Clone)]
-pub(crate) struct ImportDecl {
-    pub(crate) facts: Option<crate::native_languages::Fact>,
-    pub(crate) specifier: String,
-    pub(crate) kind: String,
-    pub(crate) line: usize,
 }
 
 pub fn analyze_project(
@@ -245,6 +238,9 @@ pub fn analyze_input(
             .unwrap_or(entry.path())
             .to_string_lossy()
             .replace('\\', "/");
+        if settings.excludes_source(&relative) {
+            continue;
+        }
         all_file_paths.insert(normalize(&relative), relative.clone());
         let Some(language) = language_for(entry.path()) else {
             continue;
@@ -335,11 +331,6 @@ pub fn analyze_input(
         }
     }
 
-    for language in ["Rust", "Python"] {
-        if files.iter().any(|f| f.language == language) {
-            scan_issues.push((language.into(),format!("{language}: статические зависимости; runtime, macro expansion и symbol resolution ограничены. no-known-consumers не применяется.")));
-        }
-    }
     let native = crate::native_resolver::NativeResolver::new(
         &root,
         &files
@@ -676,6 +667,7 @@ pub fn analyze_input(
         .cloned()
         .collect();
     manifests.sort();
+    let excluded_paths = settings.config.analysis.exclude.clone();
     let (diagnostics, rules_run) = crate::diagnostics::evaluate(
         settings,
         crate::diagnostics::RuleInput {
@@ -688,13 +680,17 @@ pub fn analyze_input(
             manifests: &manifests,
         },
     )?;
-    let analysis_profile = crate::language::profile(
+    let mut analysis_profile = crate::language::profile(
         &files
             .iter()
             .map(|f| f.language.as_str())
             .collect::<Vec<_>>(),
         &settings_roots,
     );
+    analysis_profile.excluded_paths = excluded_paths;
+    if !analysis_profile.excluded_paths.is_empty() {
+        analysis_profile.limitations.push(format!("Файлы исключены из анализа по шаблонам: {}. Их зависимости и потребители не входят в граф.", analysis_profile.excluded_paths.join(", ")));
+    }
     let mut native_counts = HashMap::<&str, usize>::new();
     for edge in &edges {
         if edge.kind == "package" {
@@ -864,6 +860,13 @@ fn package_name(specifier: &str) -> Option<String> {
     }
 }
 fn is_builtin(name: &str) -> bool {
+    // These modules require the prefix: bare `test` can be an npm package.
+    if matches!(
+        name,
+        "node:test" | "node:test/reporters" | "node:sea" | "node:sqlite"
+    ) {
+        return true;
+    }
     let builtin = name.strip_prefix("node:").unwrap_or(name);
     oxc_resolver::NODEJS_BUILTINS.contains(&builtin)
 }
@@ -1011,6 +1014,67 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::tempdir;
+
+    #[test]
+    fn prefix_only_node_builtins_do_not_become_npm_dependencies() {
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("main.mjs"), "import 'node:test'; import 'node:test/reporters'; import 'node:sqlite'; import 'node:sea'; import 'node:fs/promises';").unwrap();
+        let output = analyze_project(root.path().to_str().unwrap(), vec![]).unwrap();
+        assert!(output.result.summary.packages.is_empty());
+        assert!(output.result.summary.resolution_issues.is_empty());
+        assert!(!is_builtin("test"));
+        assert!(!is_builtin("sqlite"));
+        assert!(!is_builtin("node:unknown-module"));
+    }
+
+    #[test]
+    fn analysis_exclusions_remove_fixture_graph_and_manifests_without_reparsing_sources() {
+        let root = tempdir().unwrap();
+        for (path, text) in [
+            ("main.ts", "import './util';"),
+            ("util.ts", "export const x = 1;"),
+            ("fixtures/a.ts", "import './b';"),
+            ("fixtures/b.ts", "import './a'; import 'demo-package';"),
+            (
+                "fixtures/package.json",
+                r#"{"dependencies":{"demo-package":"1"}}"#,
+            ),
+        ] {
+            let file = root.path().join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, text).unwrap();
+        }
+        let first = analyze_project(root.path().to_str().unwrap(), vec![]).unwrap();
+        assert_eq!(first.result.summary.cycle_count, 1);
+        fs::write(
+            root.path().join("dependency.config.json"),
+            r#"{"analysis":{"exclude":["fixtures/**"]}}"#,
+        )
+        .unwrap();
+        let next = analyze_project(root.path().to_str().unwrap(), first.file_cache).unwrap();
+        assert_eq!(next.parsed_file_count, 0);
+        assert_eq!(next.reused_file_count, 2);
+        assert_eq!(next.result.summary.cycle_count, 0);
+        assert!(next.result.summary.packages.is_empty());
+        assert!(
+            next.result
+                .nodes
+                .iter()
+                .all(|n| !n.path.starts_with("fixtures/"))
+        );
+        assert_ne!(first.result.analysis_profile, next.result.analysis_profile);
+        assert_eq!(
+            next.result.analysis_profile.unwrap().excluded_paths,
+            vec!["fixtures/**"]
+        );
+        // Bad configuration must fail before any new snapshot can be published.
+        fs::write(
+            root.path().join("dependency.config.json"),
+            r#"{"analysis":{"exclude":["["]}}"#,
+        )
+        .unwrap();
+        assert!(analyze_project(root.path().to_str().unwrap(), next.file_cache).is_err());
+    }
 
     #[test]
     fn parses_import_reexport_and_dynamic_import() {
@@ -1438,6 +1502,20 @@ mod tests {
             .result;
         assert!(result.summary.file_count > result.summary.source_file_count);
         assert!(result.summary.source_file_count >= 4);
+        for parser in [
+            "src-tauri/src/js_ts.rs",
+            "src-tauri/src/native_languages.rs",
+        ] {
+            assert!(!result.edges.iter().any(|edge| edge.source == parser && edge.target == "src-tauri/src/analysis.rs"), "A language parser must not depend on the analysis orchestrator: {parser}");
+            assert!(
+                result
+                    .edges
+                    .iter()
+                    .any(|edge| edge.source == parser
+                        && edge.target == "src-tauri/src/parse_facts.rs"),
+                "Shared parser facts must be visible in the real graph: {parser}"
+            );
+        }
         let unresolved_outside_fixtures: Vec<_> = result
             .summary
             .resolution_issues

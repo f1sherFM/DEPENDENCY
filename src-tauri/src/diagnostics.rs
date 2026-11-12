@@ -18,7 +18,7 @@ const RULES: [&str; 6] = [
     "resolution",
     "parse-error",
 ];
-const COVERAGE_LIMITATION: &str = "Анализ ограничен индексированными JS/TS и статически извлечёнными импортами. Ignore-правила, framework entry points и вычисляемые пути могут скрывать потребителей. Отсутствие сигнала не доказывает отсутствие проблем.";
+const COVERAGE_LIMITATION: &str = "Анализ ограничен индексированными исходниками и статически извлечёнными зависимостями. Исключённые файлы, framework entry points, макросы и вычисляемые пути могут скрывать потребителей. Отсутствие сигнала не доказывает отсутствие проблем. Ограничения языков указаны в профиле анализа.";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -92,9 +92,18 @@ impl Default for RuleConfig {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RulesConfig {
     #[serde(default)]
+    pub analysis: AnalysisConfig,
+    #[serde(default)]
     pub python: PythonConfig,
     #[serde(default)]
     pub rules: BTreeMap<String, RuleConfig>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnalysisConfig {
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -106,6 +115,7 @@ pub struct PythonConfig {
 pub struct Settings {
     pub config: RulesConfig,
     exclusions: HashMap<String, GlobSet>,
+    source_exclusions: GlobSet,
 }
 impl Settings {
     pub fn load(root: &Path) -> Result<Self, String> {
@@ -162,7 +172,24 @@ impl Settings {
                 builder.build().map_err(|error| error.to_string())?,
             );
         }
-        Ok(Self { config, exclusions })
+        config.analysis.exclude.sort();
+        config.analysis.exclude.dedup();
+        let mut builder = GlobSetBuilder::new();
+        for pattern in &config.analysis.exclude {
+            builder.add(
+                Glob::new(pattern)
+                    .map_err(|error| format!("analysis: неверный exclude `{pattern}`: {error}"))?,
+            );
+        }
+        let source_exclusions = builder.build().map_err(|error| error.to_string())?;
+        Ok(Self {
+            config,
+            exclusions,
+            source_exclusions,
+        })
+    }
+    pub fn excludes_source(&self, path: &str) -> bool {
+        self.source_exclusions.is_match(path)
     }
     fn allows(&self, rule: &str, path: &str) -> bool {
         !self.exclusions[rule].is_match(path)
@@ -415,6 +442,13 @@ pub fn evaluate(
                 }
             }
             "no-known-consumers" => {
+                if nodes
+                    .iter()
+                    .any(|node| matches!(node.language.as_deref(), Some("Rust" | "Python")))
+                {
+                    skipped_rules.push(SkippedRule { rule_id: rule.into(), reason: "Пропущено: Rust/Python поддерживают ограниченное статическое разрешение; поиск всех потребителей не гарантирован".into() });
+                    continue;
+                }
                 if coverage_issue_count > 0 {
                     skipped_rules.push(SkippedRule { rule_id: rule.into(), reason: "Пропущено: ошибки разбора, чтения или разрешения импортов делают поиск потребителей неполным".into() });
                     continue;

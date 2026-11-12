@@ -1,3 +1,4 @@
+mod agent_access;
 mod analysis;
 mod comparison;
 mod diagnostics;
@@ -6,17 +7,83 @@ mod git_jobs;
 #[cfg(test)]
 mod git_tests;
 mod impact;
+mod investigations;
 mod js_ts;
 mod language;
 mod native_languages;
 mod native_resolver;
 #[cfg(test)]
 mod native_tests;
+mod parse_facts;
 mod resolver;
 mod snapshot;
 mod storage;
 
 use tauri::{Manager, State};
+
+#[tauri::command]
+async fn save_investigation(
+    request: investigations::SaveRequest,
+    state: State<'_, storage::AppState>,
+) -> Result<investigations::Investigation, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || investigations::save(&state, request))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn load_investigation(
+    id: String,
+    state: State<'_, storage::AppState>,
+) -> Result<investigations::Investigation, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || investigations::load(&state, &id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn list_investigations(
+    project_id: String,
+    offset: usize,
+    limit: usize,
+    state: State<'_, storage::AppState>,
+) -> Result<investigations::Page, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        investigations::list(&state, &project_id, offset, limit)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn delete_investigation(
+    id: String,
+    expected_revision: i64,
+    state: State<'_, storage::AppState>,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        investigations::delete(&state, &id, expected_revision)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn agent_access_enabled(access: State<'_, agent_access::AgentAccess>) -> bool {
+    access.enabled()
+}
+
+#[tauri::command]
+async fn publish_agent_state(
+    state: serde_json::Value,
+    access: State<'_, agent_access::AgentAccess>,
+) -> Result<(), String> {
+    let access = access.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || access.publish(state))
+        .await
+        .map_err(|error| error.to_string())?
+}
 
 #[tauri::command]
 async fn list_projects(
@@ -269,6 +336,7 @@ pub fn run() {
         .manage(comparison::Comparisons::default())
         .setup(|app| {
             let database_path = app.path().app_data_dir()?.join("dependency.sqlite3");
+            app.manage(agent_access::AgentAccess::new(app.path().app_data_dir()?));
             let storage = storage::initialize(database_path).map_err(std::io::Error::other)?;
             app.manage(storage);
             if cfg!(debug_assertions) {
@@ -281,6 +349,12 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            save_investigation,
+            load_investigation,
+            list_investigations,
+            delete_investigation,
+            agent_access_enabled,
+            publish_agent_state,
             analyze_project,
             list_projects,
             open_project,

@@ -8,6 +8,8 @@ pub struct AnalysisProfile {
     pub graph_semantics: String,
     pub analyzers: std::collections::BTreeMap<String, (String, String)>,
     pub python_roots: Vec<String>,
+    #[serde(default)]
+    pub excluded_paths: Vec<String>,
     pub limitations: Vec<String>,
 }
 pub fn profile(languages: &[&str], roots: &[String]) -> AnalysisProfile {
@@ -15,9 +17,9 @@ pub fn profile(languages: &[&str], roots: &[String]) -> AnalysisProfile {
     let mut limitations = Vec::new();
     for language in languages {
         let (parser, resolver) = match *language {
-            "Rust" => ("rust-parser-1", "rust-resolver-1"),
+            "Rust" => ("rust-parser-1", "rust-resolver-2"),
             "Python" => ("python-parser-1", "python-resolver-1"),
-            _ => ("js-ts-parser-2", "js-ts-resolver-3"),
+            _ => ("js-ts-parser-2", "js-ts-resolver-4"),
         };
         analyzers.insert(language.to_string(), (parser.into(), resolver.into()));
     }
@@ -34,6 +36,7 @@ pub fn profile(languages: &[&str], roots: &[String]) -> AnalysisProfile {
         graph_semantics: "file-dependencies-2".into(),
         analyzers,
         python_roots,
+        excluded_paths: Vec::new(),
         limitations,
     }
 }

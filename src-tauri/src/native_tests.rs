@@ -1,5 +1,28 @@
 use crate::{analysis, storage};
 use std::{fs, path::Path};
+#[test]
+fn rust_super_cannot_escape_the_crate_root() {
+    let root = fixture();
+    write(root.path(), "src/lib.rs", "pub struct Thing;\nmod child;\n");
+    write(root.path(), "src/child.rs", "use super::super::Thing;\n");
+    let output = analysis::analyze_project(root.path().to_str().unwrap(), vec![]).unwrap();
+    assert!(
+        !output
+            .result
+            .edges
+            .iter()
+            .any(|edge| edge.source == "src/child.rs"),
+        "invalid super traversal must not create a confirmed dependency"
+    );
+    assert!(
+        output
+            .result
+            .summary
+            .resolution_issues
+            .iter()
+            .any(|issue| issue.source == "src/child.rs")
+    );
+}
 fn write(root: &Path, path: &str, text: &str) {
     let path = root.join(path);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -36,6 +59,23 @@ fn fixture() -> tempfile::TempDir {
 fn mixed_graph_has_real_targets_separate_relations_and_reuses_all_parsers() {
     let root = fixture();
     let first = analysis::analyze_project(root.path().to_str().unwrap(), vec![]).unwrap();
+    assert!(
+        !first
+            .result
+            .diagnostics
+            .iter()
+            .any(|d| d.rule_id == "parse-error")
+    );
+    assert!(
+        first
+            .result
+            .analysis_profile
+            .as_ref()
+            .unwrap()
+            .limitations
+            .len()
+            >= 2
+    );
     let edge = |source: &str, target: &str, kind: &str| {
         first
             .result

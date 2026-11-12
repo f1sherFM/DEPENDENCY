@@ -1,6 +1,6 @@
 use crate::{
-    analysis::{ImportDecl, ResolutionIssue},
-    native_languages::Fact,
+    analysis::ResolutionIssue,
+    parse_facts::{Fact, ImportDecl},
 };
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -712,9 +712,16 @@ impl NativeResolver {
                     } else if parts.first().is_some_and(|p| p == "self") {
                         parts.remove(0);
                     } else {
+                        let mut escaped_root = false;
                         while parts.first().is_some_and(|p| p == "super") {
-                            current.pop();
+                            if current.pop().is_none() {
+                                escaped_root = true;
+                                break;
+                            }
                             parts.remove(0);
+                        }
+                        if escaped_root {
+                            continue;
                         }
                     }
                     if parts.last().is_some_and(|p| p == "*") {

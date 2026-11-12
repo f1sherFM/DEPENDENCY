@@ -1,6 +1,6 @@
 [package]
 name = "dependency"
-version = "0.8.0"
+version = "0.9.0"
 description = "Local software architecture and dependency analyzer"
 authors = ["f1sherFM"]
 license = "MIT"

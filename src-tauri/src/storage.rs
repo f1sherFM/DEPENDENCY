@@ -11,7 +11,7 @@ use uuid::Uuid;
 // Keep these independent of the app release: bump only when parser output or
 // diagnostic semantics change, so UI and storage changes do not invalidate AST cache.
 pub const ANALYZER_VERSION: &str = "js-ts-parser-2";
-pub const RULES_VERSION: &str = "diagnostics-4+resolver-4";
+pub const RULES_VERSION: &str = "diagnostics-5+resolver-5";
 
 #[derive(Clone)]
 pub struct AppState {
@@ -63,7 +63,7 @@ pub fn initialize(path: PathBuf) -> Result<AppState, String> {
     let schema_version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|e| format!("Не удалось проверить версию базы данных: {e}"))?;
-    if schema_version > 2 {
+    if schema_version > 3 {
         return Err(format!(
             "База DEPENDENCY имеет более новую версию схемы ({schema_version}) и не может быть открыта этой версией приложения"
         ));
@@ -96,14 +96,20 @@ pub fn initialize(path: PathBuf) -> Result<AppState, String> {
             .execute("ALTER TABLE snapshots ADD COLUMN basis_json TEXT", [])
             .map_err(|e| e.to_string())?;
     }
-    transaction.execute_batch("CREATE TABLE IF NOT EXISTS snapshot_files(snapshot_id TEXT NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE, relative_path TEXT NOT NULL, metadata_json TEXT NOT NULL, imports_json TEXT NOT NULL, PRIMARY KEY(snapshot_id,relative_path)); PRAGMA user_version=2;").map_err(|e| e.to_string())?;
+    transaction.execute_batch("CREATE TABLE IF NOT EXISTS snapshot_files(snapshot_id TEXT NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE, relative_path TEXT NOT NULL, metadata_json TEXT NOT NULL, imports_json TEXT NOT NULL, PRIMARY KEY(snapshot_id,relative_path));").map_err(|e| e.to_string())?;
+    transaction.execute_batch("CREATE TABLE IF NOT EXISTS investigations(
+        id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
+        name TEXT NOT NULL, note TEXT NOT NULL, state_version INTEGER NOT NULL,
+        revision INTEGER NOT NULL, graph_json TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    ); CREATE INDEX IF NOT EXISTS investigations_snapshot_updated ON investigations(snapshot_id,updated_at);
+    PRAGMA user_version=3;").map_err(|e| e.to_string())?;
     transaction
         .commit()
         .map_err(|e| format!("Не удалось мигрировать SQLite: {e}"))?;
     Ok(state)
 }
 
-fn connect(state: &AppState) -> Result<Connection, String> {
+pub(crate) fn connect(state: &AppState) -> Result<Connection, String> {
     let connection = Connection::open(&state.database_path)
         .map_err(|e| format!("Не удалось открыть базу проектов: {e}"))?;
     connection
@@ -114,7 +120,7 @@ fn connect(state: &AppState) -> Result<Connection, String> {
     Ok(connection)
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
