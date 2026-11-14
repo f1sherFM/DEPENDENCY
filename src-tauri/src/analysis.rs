@@ -342,7 +342,6 @@ pub fn analyze_input(
         cancel,
     )?;
     let settings_roots = native.python_roots();
-    scan_issues.extend(native.manifest_issues.clone());
     let mut nodes: Vec<GraphNode> = files
         .iter()
         .map(|file| GraphNode {
@@ -383,7 +382,10 @@ pub fn analyze_input(
     }
     let mut edges = Vec::new();
     let mut extra_file_nodes = HashMap::<String, usize>::new();
-    let mut resolution_issues = Vec::<ResolutionIssue>::new();
+    let mut resolution_issues: Vec<ResolutionIssue> = native.manifest_issues.iter().map(|(source,reason)|ResolutionIssue{
+        source:source.clone(),specifier:"<manifest>".into(),line:1,status:"unsupported".into(),reason:reason.clone(),attempted_candidates:vec![],
+        hint:"Манифест прочитан, но часть зависимостей не входит в поддерживаемую модель или индекс. Это ограничение покрытия, не синтаксическая ошибка исходника.".into(),
+    }).collect();
     let mut ambiguous_count = 0usize;
     let mut imported_packages = BTreeMap::<String, usize>::new();
     let mut package_imports = Vec::<(usize, String, usize)>::new();

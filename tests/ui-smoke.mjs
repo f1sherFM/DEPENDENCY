@@ -80,6 +80,10 @@ try {
       if (cmd === 'agent_access_enabled') return true;
       if (cmd === 'publish_agent_state') { window.__agentState=args.state; return; }
       const researchRecords=()=>JSON.parse(localStorage.getItem('dependency-research-fixture')||'[]');
+      if(cmd==='plugin:dialog|save')return 'C:/fixture/export.dependency.json';
+      if(cmd==='export_research'){window.__exportedResearch=args;return;}
+      if(cmd==='preview_research'){window.__previewCalls=(window.__previewCalls||0)+1;return {fingerprint:'test-file-hash',name:'Portable research',note:'Imported text <script>data</script>',snapshotId:'origin-snapshot',createdAt:0,analyzerVersion:'origin-analyzer',rulesVersion:'origin-rules',nodes:3,edges:2,files:3,origin:'C:/other-computer/project'};}
+      if(cmd==='import_research'){window.__importCalls=(window.__importCalls||0)+1;throw new Error('Import fixture intentionally unavailable');}
       if(cmd==='list_investigations'){const records=researchRecords().filter(item=>item.projectId===args.projectId);return {items:records.slice(args.offset,args.offset+args.limit),total:records.length,nextOffset:args.offset+args.limit<records.length?args.offset+args.limit:null};}
       if(cmd==='load_investigation'){const record=researchRecords().find(item=>item.id===args.id);if(!record)throw new Error('Research not found');return record;}
       if(cmd==='save_investigation'){
@@ -155,6 +159,15 @@ try {
   await installBridge(analysis);
   await send('Page.navigate', { url: origin });
   await wait(`document.querySelector('.main-nav') && document.querySelector('.stat-card')`);
+  await wait(`document.querySelector('.architecture-map')`);
+  const mapPositions=await evaluate(`Array.from(document.querySelectorAll('.architecture-node')).map(node=>[node.style.left,node.style.top])`);
+  if(await evaluate(`!!document.querySelector('.architecture-hit')`)) {
+    await evaluate(`document.querySelector('.architecture-hit').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))`);
+    await wait(`document.querySelector('.architecture-evidence li')`);
+    assert.deepEqual(await evaluate(`Array.from(document.querySelectorAll('.architecture-node')).map(node=>[node.style.left,node.style.top])`),mapPositions,'opening relation evidence must not move the map');
+    await evaluate(`Array.from(document.querySelectorAll('.architecture-evidence button')).find(button=>button.textContent==='Закрыть сведения').click()`);
+  }
+  await writeFile(join(output,'architecture-overview.png'),Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'));
   await evaluate(`window.__dialogFailure=true;document.querySelector('button.sidebar-project').click()`);
   await wait(`document.querySelector('.error-banner')?.textContent.includes('Folder picker fixture failure')`);
   await wait(`!document.querySelector('.page-heading .primary-button').disabled`);
@@ -229,9 +242,18 @@ try {
     await evaluate(`Array.from(document.querySelectorAll('.impact-proof button')).find(button=>button.textContent==='Показать сегмент в графе').click()`);
     await wait(`document.querySelectorAll('.graph-node.impact-root').length === 1`);
     assert.equal(await evaluate(`document.querySelectorAll('.graph-edge').length`),3);
+    await evaluate(`document.querySelector('[aria-label="Выбрать src/target.ts"]').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
+    await wait(`document.querySelector('.impact-action')`);
+    await evaluate(`(() => {const input=document.querySelector('[aria-label="Поиск узла"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'target');input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    await wait(`document.querySelector('[aria-label="Поиск узла"]').value==='target'`);
+    await evaluate(`document.querySelector('.impact-action').click()`);
+    await wait(`Array.from(document.querySelectorAll('.impact-journey-tools button')).some(b=>b.textContent==='Вернуться к файлу')`);
+    await evaluate(`Array.from(document.querySelectorAll('.impact-journey-tools button')).find(b=>b.textContent==='Вернуться к файлу').click()`);
+    await wait(`document.querySelector('.impact-graph-context')&&document.querySelector('[aria-label="Поиск узла"]').value==='target'`);
     await evaluate(`Array.from(document.querySelectorAll('.graph-navigation button')).find(button=>button.textContent==='К анализу влияния').click()`);
     await evaluate(`window.__delayNextImpact=1500; Array.from(document.querySelectorAll('.impact-options button')).find(button=>button.textContent==='Статические').click()`);
     await wait(`window.__impactCalls.at(-1).edgeKinds.length === 3`);
+    assert.ok(await evaluate(`Array.from(document.querySelectorAll('.impact-journey-tools button')).find(b=>b.textContent==='Сохранить выводы').disabled`));
     await evaluate(`Array.from(document.querySelectorAll('.impact-options button')).find(button=>button.textContent==='Все импорты').click()`);
     await wait(`document.querySelector('.impact-summary')?.textContent.includes('Потребителей: 7')`);
     await evaluate(`new Promise(done=>setTimeout(done,1600))`);
@@ -248,12 +270,61 @@ try {
     await evaluate(`document.querySelector('.impact-choices button').click()`);
     await wait(`document.querySelectorAll('.impact-table tbody tr').length === 6`);
     await evaluate(`document.querySelectorAll('.main-nav button')[1].click()`);
+    await wait(`document.querySelector('[aria-label="Поиск узла"]')`);
+    await evaluate(`(() => {const input=document.querySelector('[aria-label="Поиск узла"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'');input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
     await wait(`document.querySelector('[aria-label="Выбрать src/unit.spec.ts"]')`);
     await evaluate(`document.querySelector('[aria-label="Выбрать src/unit.spec.ts"]').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
     await wait(`document.querySelector('.impact-action')`);
     await evaluate(`document.querySelector('.impact-action').click()`);
     await wait(`document.querySelector('.impact-empty')?.textContent.includes('не найдены потребители')`);
     assert.ok(await evaluate(`document.querySelector('.impact-empty').textContent.includes('не означает')`));
+    // Walk the user route against the real engine fixture, then reopen its saved result.
+    await reload();await wait(`document.querySelector('.architecture-node')`);
+    await evaluate(`Array.from(document.querySelectorAll('.architecture-node')).find(b=>b.title==='src').click()`);
+    await wait(`Array.from(document.querySelectorAll('.architecture-node')).some(b=>b.textContent.includes('Файлы каталога'))`);
+    await evaluate(`Array.from(document.querySelectorAll('.architecture-node')).find(b=>b.textContent.includes('Файлы каталога')).click()`);
+    await wait(`Array.from(document.querySelectorAll('.architecture-node')).some(b=>b.title==='src/target.ts')`);
+    await evaluate(`Array.from(document.querySelectorAll('.architecture-node')).find(b=>b.title==='src/target.ts').click()`);
+    await wait(`document.querySelector('.graph-node.selected')?.dataset.nodeId==='src/target.ts'`);
+    await evaluate(`document.querySelector('.node-details .relation-link').click()`);
+    await wait(`document.querySelector('.relation-evidence')`);
+    await evaluate(`Array.from(document.querySelectorAll('.relation-evidence button')).find(b=>b.textContent==='src/target.ts'||b.textContent.startsWith('src/target.ts:')).click()`);
+    await wait(`document.querySelector('.graph-node.selected')?.dataset.nodeId==='src/target.ts'`);
+    await evaluate(`document.querySelector('[title="Отдалить"]').click()`);
+    const routeCamera=()=>evaluate(`(() => {const box=document.querySelector('.graph-canvas').getBoundingClientRect();const m=document.querySelector('.graph-canvas > svg > g').transform.baseVal.consolidate().matrix;return {zoom:m.a,x:(box.width/2-m.e)/m.a,y:(box.height/2-m.f)/m.a};})()`);
+    await evaluate(`new Promise(resolve=>setTimeout(resolve,150))`);
+    const beforeImpact=await routeCamera();
+    await evaluate(`document.querySelector('.impact-action').click()`);
+    await wait(`document.querySelectorAll('.impact-table tbody tr').length===7`);
+    await evaluate(`document.querySelector('.impact-list-tools input[type=checkbox]').click()`);
+    await wait(`document.querySelectorAll('.impact-table tbody tr').length===1`);
+    await evaluate(`document.querySelector('.impact-table .text-button').click()`);
+    await wait(`document.querySelectorAll('.impact-proof li').length===3`);
+    await wait(`!Array.from(document.querySelectorAll('.impact-journey-tools button')).find(b=>b.textContent==='Сохранить выводы').disabled`);
+    await evaluate(`Array.from(document.querySelectorAll('.impact-journey-tools button')).find(b=>b.textContent==='Сохранить выводы').click()`);
+    await wait(`document.querySelector('.investigation-dialog')?.open`);
+    assert.ok(await evaluate(`document.querySelector('.finding-explanation').textContent.includes('первого исходного файла')`));
+    assert.ok(await evaluate(`document.querySelector('.investigation-dialog textarea').value.includes('src/target.ts')&&document.querySelector('.investigation-dialog textarea').value.includes('из 3')`));
+    await evaluate(`document.querySelector('.investigation-dialog button[type=submit]').click()`);
+    await wait(`document.querySelector('.finding-saved')`);
+    const finding=await evaluate(`window.__lastResearchSave`);
+    assert.equal(finding.graph.direction,'incoming');assert.equal(finding.graph.selectedNodeId,'src/target.ts');
+    await evaluate(`Array.from(document.querySelectorAll('.impact-journey-tools button')).find(b=>b.textContent==='Вернуться к файлу').click()`);
+    await wait(`document.querySelector('.graph-node.selected')?.dataset.nodeId==='src/target.ts'&&document.querySelector('.relation-evidence')`);
+    await evaluate(`new Promise(resolve=>setTimeout(resolve,150))`);
+    const afterImpact=await routeCamera();
+    assert.ok(Math.abs(beforeImpact.zoom-afterImpact.zoom)<.0001&&Math.abs(beforeImpact.x-afterImpact.x)<.1&&Math.abs(beforeImpact.y-afterImpact.y)<.1,'Impact back restores graph camera');
+    await evaluate(`Array.from(document.querySelectorAll('.graph-navigation button')).find(b=>b.textContent.includes('К карте проекта')).click()`);
+    await wait(`document.querySelector('.architecture-navigation').textContent.includes('/src · файлы каталога')`);
+    await reload();await wait(`document.querySelector('.stat-card')`);
+    await evaluate(`document.querySelectorAll('.main-nav button')[8].click()`);await wait(`document.querySelector('.investigation-item')`);
+    await evaluate(`Array.from(document.querySelectorAll('.investigation-item button')).find(b=>b.textContent==='Открыть исследование').click()`);
+    await wait(`document.querySelector('.graph-node.selected')?.dataset.nodeId==='src/target.ts'`);
+    assert.equal(await evaluate(`document.querySelector('[aria-label="Направление связей"]').value`),'incoming');
+    assert.ok(await evaluate(`document.querySelector('.research-context').textContent.includes(${JSON.stringify('снимок '+finding.snapshotId.slice(0,8))})`));
+    assert.equal(await evaluate(`window.__analysisCalls||0`),0);
+    await evaluate(`localStorage.removeItem('dependency-research-fixture')`);
+    console.log('PASS: map → file → relation evidence → Impact proof → saved findings; camera/map back navigation and restart without analysis');
     console.log('PASS: real Rust impact responses, type filters, partial counts, test path, graph roots, multi-root union, file-context action and empty result');
   }
   if(fixture.git){
@@ -309,6 +380,17 @@ try {
   await evaluate(`document.querySelector('.investigation-dialog button[type="submit"]').click()`);
   await wait(`!document.querySelector('.investigation-dialog')&&document.querySelector('.research-context')`);
   const savedResearch=await evaluate(`window.__lastResearchSave`);
+  await evaluate(`document.querySelectorAll('.main-nav button')[8].click()`);await wait(`document.querySelector('.investigation-item')`);
+  await evaluate(`Array.from(document.querySelectorAll('.investigation-item button')).find(b=>b.textContent==='Экспортировать').click()`);
+  await wait(`window.__exportedResearch`);
+  await evaluate(`window.__dialogResult='C:/fixture/import.dependency.json';Array.from(document.querySelectorAll('.investigation-heading button')).find(b=>b.textContent==='Импортировать исследование').click()`);
+  await wait(`document.querySelector('.transfer-preview')`);
+  assert.ok(await evaluate(`document.querySelector('.transfer-preview').textContent.includes('C:/other-computer/project')&&document.querySelector('.transfer-preview').textContent.includes('Imported text <script>data</script>')`));
+  assert.equal(await evaluate(`window.__importCalls||0`),0);
+  await evaluate(`Array.from(document.querySelectorAll('.transfer-preview button')).find(b=>b.textContent==='Отмена импорта').click()`);
+  await wait(`!document.querySelector('.transfer-preview')`);
+  assert.equal(await evaluate(`window.__importCalls||0`),0);
+
   assert.equal(savedResearch.graph.query,researchNode.label);assert.equal(savedResearch.graph.selectedNodeId,researchNode.id);assert.equal(savedResearch.graph.detailsOpen,false);
   assert.ok(Math.abs(savedResearch.graph.camera.centerX-savedPose.centerX)<0.1&&Math.abs(savedResearch.graph.camera.centerY-savedPose.centerY)<0.1);
   await send('Emulation.setDeviceMetricsOverride',{width:1280,height:720,deviceScaleFactor:1.25,mobile:false});
@@ -337,10 +419,17 @@ try {
   crowded.nodes = Array.from({length:36},(_,index)=>({id:`preview-${index}.ts`,label:`preview-${index}.ts`,path:`preview-${index}.ts`,kind:'file',language:'TypeScript',lines:1,incoming:0,outgoing:0,declared:null}));
   crowded.edges = [];
   await installBridge(crowded);
-  await reload(); await wait(`document.querySelectorAll('.mini-node').length===36`);
-  assert.ok(await evaluate(`(() => {const svg=document.querySelector('.mini-graph svg');const box=svg.viewBox.baseVal;return Array.from(svg.querySelectorAll('.mini-node rect')).every(rect=>rect.x.baseVal.value>=box.x&&rect.y.baseVal.value>=box.y&&rect.x.baseVal.value+rect.width.baseVal.value<=box.x+box.width&&rect.y.baseVal.value+rect.height.baseVal.value<=box.y+box.height);})()`),'all 36 preview nodes must fit inside the SVG');
+  await reload(); await wait(`document.querySelectorAll('.architecture-node').length===1`);
+  assert.ok(await evaluate(`document.querySelector('.architecture-node').textContent.includes('36 файлов')`));
+  await evaluate(`document.querySelector('.architecture-node').click()`);
+  await wait(`document.querySelectorAll('.architecture-node').length===12`);
+  assert.ok(await evaluate(`document.querySelector('.architecture-summary').textContent.includes('12 из 36')`));
+  await evaluate(`Array.from(document.querySelectorAll('.architecture-map button')).find(button=>button.textContent.includes('Показать ещё части')).click()`);
+  await wait(`document.querySelectorAll('.architecture-node').length===24`);
+  assert.ok(await evaluate(`document.scrollingElement.scrollWidth<=innerWidth`));
+  await writeFile(join(output,'architecture-map.png'),Buffer.from((await send('Page.captureScreenshot',{format:'png'})).data,'base64'));
   assert.ok(await evaluate(`document.querySelector('[aria-label="Настройки пока недоступны"]').disabled`));
-  await evaluate(`document.querySelector('.mini-node').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
+  await evaluate(`document.querySelector('.architecture-node').click()`);
   await wait(`document.querySelector('.graph-workspace') && document.querySelector('.graph-node.selected')`);
   // A small, tall graph crosses the coverage hint's visibility boundary while zooming.
   const zoomFixture = structuredClone(analysis);

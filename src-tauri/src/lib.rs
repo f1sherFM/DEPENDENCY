@@ -15,12 +15,47 @@ mod native_resolver;
 #[cfg(test)]
 mod native_tests;
 mod parse_facts;
+mod python_resolver;
+#[cfg(test)]
+mod python_tests;
 mod resolver;
 mod snapshot;
 mod storage;
+mod transfer;
 
 use tauri::{Manager, State};
 
+#[tauri::command]
+async fn export_research(
+    state: State<'_, storage::AppState>,
+    id: String,
+    path: String,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || transfer::export(&state, &id, &path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn preview_research(path: String) -> Result<transfer::Preview, String> {
+    tauri::async_runtime::spawn_blocking(move || transfer::preview(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn import_research(
+    state: State<'_, storage::AppState>,
+    path: String,
+    fingerprint: String,
+    project_id: String,
+) -> Result<investigations::Investigation, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        transfer::import(&state, &path, &fingerprint, &project_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 #[tauri::command]
 async fn save_investigation(
     request: investigations::SaveRequest,
@@ -349,6 +384,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            export_research,
+            preview_research,
+            import_research,
             save_investigation,
             load_investigation,
             list_investigations,

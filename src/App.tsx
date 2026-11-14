@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { GraphView } from "./GraphView";
+import type { GraphHandle } from "./GraphView";
+import { ArchitectureMap, initialArchitectureLocation } from "./ArchitectureMap";
+import type { ArchitectureLocation } from "./ArchitectureMap";
+import type { Dispatch, SetStateAction } from "react";
+import { findingName, graphForImpactRoot } from "./researchJourney";
 import { useAgentObservation } from "./agentObservation";
 import { InvestigationDialog, InvestigationsView } from "./InvestigationsView";
 import type { InvestigationDraft } from "./InvestigationsView";
@@ -49,6 +54,12 @@ function App() {
   const [activeInvestigation,setActiveInvestigation]=useState<Investigation|null>(null);
   const [researchDraft,setResearchDraft]=useState<InvestigationDraft|null>(null);
   const [researchRevision,setResearchRevision]=useState(0);
+  const [mapLocation,setMapLocation]=useState(initialArchitectureLocation);
+  const [fromMap,setFromMap]=useState(false);
+  const [selectedEdge,setSelectedEdge]=useState<string|null>(null);
+  const graphHandle=useRef<GraphHandle>(null);
+  const [impactReturn,setImpactReturn]=useState<{snapshotId:string;graph:SavedGraphState;diagnostic:Diagnostic|null;scope:ImpactGraphScope|null;edge:string|null;investigation:Investigation|null}|null>(null);
+  const [savedFinding,setSavedFinding]=useState<string|null>(null);
   const agentStatus = useAgentObservation({ projectId: currentProject?.project.id ?? null, snapshotId: currentProject?.snapshot.id ?? null, view, selectedNodeId: selected, busy });
   const navigationGeneration = useRef(0);
   const graphSearch = useRef<HTMLInputElement>(null);
@@ -81,6 +92,7 @@ function App() {
   }, [currentProject?.project.id, currentProject?.snapshot.id]);
 
   const showProject = (project: ProjectView) => {
+    setMapLocation(initialArchitectureLocation);setFromMap(false);setSelectedEdge(null);setImpactReturn(null);setSavedFinding(null);
     setGraphRestore(null);setActiveInvestigation(null);setResearchDraft(null);
     if (currentProject?.project.id !== project.project.id) setGitVisited(false);
     setCurrentProject(project); setAnalysis(project.result); setGraphDiagnostic(null); setImpactScope(null); setImpactRoots([]); setSelected(null); setView("overview");
@@ -147,8 +159,18 @@ function App() {
     finally { if (token === navigationGeneration.current) { setBusy(false); setGitJobId(null); } }
   };
 
-  const selectNode = (id: string) => { setSelected(id); if (!graphDiagnostic?.nodeIds.includes(id)) setGraphDiagnostic(null); if (!impactScope?.nodeIds.includes(id)) setImpactScope(null); };
-  const openImpact = (id: string) => { setImpactRoots([id]); setImpactScope(null); setGraphDiagnostic(null); setView("impact"); };
+  const selectNode = (id: string,edgeId?:string) => { setSelected(id);setSelectedEdge(edgeId??null);if(id)setDetailsOpen(true); if (!graphDiagnostic?.nodeIds.includes(id)) setGraphDiagnostic(null); if (!impactScope?.nodeIds.includes(id)) setImpactScope(null); };
+  const openImpact = (id: string) => {
+    const graph=graphHandle.current?.capture();
+    setImpactReturn(graph&&currentProject?{snapshotId:currentProject.snapshot.id,graph,diagnostic:graphDiagnostic,scope:impactScope,edge:selectedEdge,investigation:activeInvestigation}:null);
+    setSavedFinding(null);setImpactRoots([id]); setImpactScope(null); setGraphDiagnostic(null); setView("impact");
+  };
+  const returnToFile=()=>{
+    if(!impactReturn||impactReturn.snapshotId!==currentProject?.snapshot.id)return;
+    setSelected(impactReturn.graph.selectedNodeId);setDetailsOpen(impactReturn.graph.detailsOpen);
+    setGraphDiagnostic(impactReturn.diagnostic);setImpactScope(impactReturn.scope);setSelectedEdge(impactReturn.edge);
+    setActiveInvestigation(impactReturn.investigation);setGraphRestore({key:crypto.randomUUID(),graph:impactReturn.graph});setView("graph");
+  };
   const openGitSnapshot = async (snapshotId: string, nodeId?: string, impact = false) => {
     if (busy) return;
     const token = ++navigationGeneration.current;
@@ -182,6 +204,7 @@ function App() {
   };
   const researchSaved=(saved:Investigation)=>{
     setResearchDraft(null);setResearchRevision(revision=>revision+1);
+    if(view==="impact")setSavedFinding(saved.name);
     if(view==="graph"&&saved.snapshotId===currentProject?.snapshot.id){
       setActiveInvestigation(saved);setGraphRestore({key:crypto.randomUUID(),graph:saved.graph});
     }else if(activeInvestigation?.id===saved.id)setActiveInvestigation(saved);
@@ -223,8 +246,8 @@ function App() {
         <div className="sidebar-divider" />
         <div className="sidebar-caption">БЫСТРЫЕ ДЕЙСТВИЯ</div>
         <button className="quick-action" onClick={() => void scan()}><Plus size={17} /> Открыть проект</button>
-        <button className="quick-action" disabled={!analysis || busy} onClick={() => analysis && void scan(analysis.summary.rootPath, true)}><RefreshCw size={16} className={busy ? "spin" : ""} /> Пересканировать</button>
-        <div className="sidebar-bottom"><span className="engine-status"><i /> Engine готов</span><span className="version">v0.9.0</span></div>
+        <button className="quick-action" disabled={!analysis || busy} onClick={() => analysis && void scan(currentProject?.project.rootPath ?? analysis.summary.rootPath, true)}><RefreshCw size={16} className={busy ? "spin" : ""} /> Пересканировать</button>
+        <div className="sidebar-bottom"><span className="engine-status"><i /> Engine готов</span><span className="version">v1.0.0</span></div>
       </aside>
 
       <main ref={mainContent} className={`main-content ${view === "graph" ? "graph-page" : ""} ${analysis && view === "graph" && detailsOpen ? "with-details" : "without-details"}`}>
@@ -233,28 +256,34 @@ function App() {
           <div className="page-heading">
             <div><div className="eyebrow"><span className="crumb">{analysis.summary.name}</span><ArrowRight size={12} /><span>{navItems.find((item) => item.id === view)?.label}</span></div>
               <h1>{view === "overview" ? "Обзор проекта" : view === "graph" ? "Граф зависимостей" : view === "modules" ? "Модули проекта" : view === "packages" ? "Внешние пакеты" : view === "history" ? "История снимков" : view === "impact" ? "Анализ влияния" : view === "git" ? "Git и сравнение архитектуры" : view === "investigations" ? "Исследования проекта" : "Проблемы анализа"}</h1>
-              <p className="subheading" title={analysis.summary.rootPath}>{view === "overview" ? "Структура и связи, обнаруженные в выбранном репозитории." : `${analysis.summary.rootPath}`}</p>
+              <p className="subheading" title={analysis.summary.rootPath}>{view === "overview" ? "Структура и связи, обнаруженные в выбранном репозитории." : `${analysis.summary.rootPath}`} {currentProject && <span className="snapshot-context"> · Снимок {currentProject.snapshot.id.slice(0,8)} · {formatDate(currentProject.snapshot.createdAt)} · {currentProject.project.latestSnapshotId===currentProject.snapshot.id?"последний":"исторический"}</span>}</p>
             </div>
-            <button className="primary-button" disabled={busy} onClick={() => void scan(analysis.summary.rootPath, true)}>{busy ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{busy ? "Анализируем…" : "Запустить анализ"}</button>
+            <button className="primary-button" disabled={busy} onClick={() => void scan(currentProject?.project.rootPath ?? analysis.summary.rootPath, true)}>{busy ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{busy ? "Анализируем…" : "Запустить анализ"}</button>
           </div>
           {analysis.analysisProfile && <details className="panel analysis-profile"><summary>Профиль анализа · {Object.keys(analysis.analysisProfile.analyzers).join(", ")}</summary>{analysis.analysisProfile.limitations.map(text=><p key={text}>{text}</p>)}{analysis.analysisProfile.analyzers.Python && <p>Python source roots: {analysis.analysisProfile.pythonRoots.map(root=>root||"корень").join(", ")}</p>}<p>Rust mod обозначает структуру, use — зависимость. Условные импорты не доказывают выполнение.</p></details>}
           {analysis.basis && <details className="snapshot-basis"><summary>Источник снимка · {analysis.basis.kind === "git-worktree" ? "Рабочая копия Git" : analysis.basis.kind === "git-commit" ? "Коммит Git" : analysis.basis.kind}</summary><p><b>{analysis.basis.kind}</b> · {analysis.basis.commitOid ?? analysis.basis.observedHeadOid ?? "unborn HEAD"} · {analysis.basis.resolutionProfile} · {analysis.basis.captureConsistency}</p></details>}
           {error && <div className="error-banner"><AlertTriangle size={16} />{error}<button onClick={() => setError(null)}><XCircle size={15} /></button></div>}
-          {view === "overview" && <Overview analysis={analysis} onOpenGraph={() => {detachResearch();setView("graph");}} onSelect={id => { detachResearch();setGraphDiagnostic(null); setImpactScope(null); setSelected(id); setView("graph"); }} />}
-          {view === "graph" && activeInvestigation && <div className="graph-navigation research-context"><b>Исследование: {activeInvestigation.name}</b><span>Сохранённый снимок {activeInvestigation.snapshotId.slice(0,8)}</span><button onClick={()=>setView("investigations")}>К исследованиям</button><button onClick={()=>{detachResearch();setSelected(null);setGraphDiagnostic(null);setImpactScope(null);}}>Закрыть исследование</button></div>}
-          {view === "graph" && <GraphView key={`${currentProject?.snapshot.id}:${graphRestore?.key??"default"}`} analysis={analysis} selected={selected} onSelect={selectNode} searchInput={graphSearch} detailsOpen={detailsOpen} setDetailsOpen={setDetailsOpen} diagnostic={graphDiagnostic} onClearDiagnostic={() => { setGraphDiagnostic(null); setImpactScope(null); }} impactScope={impactScope} onOpenImpact={() => setView("impact")} onOpenDiagnostic={() => setView("problems")} savedGraph={graphRestore?.graph} onSaveResearch={saveResearchGraph} busy={busy} />}
+          {view === "overview" && <Overview analysis={analysis} location={mapLocation} onChange={setMapLocation} onOpenGraph={() => {detachResearch();setView("graph");}} onSelect={(id,edgeId) => { detachResearch();setFromMap(true);setGraphDiagnostic(null); setImpactScope(null); selectNode(id,edgeId); setView("graph"); }} />}
+          {view === "graph" && activeInvestigation && <div className="graph-navigation research-context"><b>Исследование: {activeInvestigation.name}</b><span>Сохранённый снимок {activeInvestigation.snapshotId.slice(0,8)}</span>{activeInvestigation.note&&<details className="research-note"><summary>Заметка</summary><p>{activeInvestigation.note}</p></details>}<button onClick={()=>setView("investigations")}>К исследованиям</button><button onClick={()=>{detachResearch();setSelected(null);setGraphDiagnostic(null);setImpactScope(null);}}>Закрыть исследование</button></div>}
+          {view === "graph" && <GraphView key={`${currentProject?.snapshot.id}:${graphRestore?.key??"default"}`} captureRef={graphHandle} onBackToMap={fromMap?()=>setView("overview"):undefined} analysis={analysis} selected={selected} onSelect={selectNode} searchInput={graphSearch} detailsOpen={detailsOpen} setDetailsOpen={setDetailsOpen} diagnostic={graphDiagnostic} onClearDiagnostic={() => { setGraphDiagnostic(null); setImpactScope(null); }} impactScope={impactScope} onOpenImpact={() => setView("impact")} onOpenDiagnostic={() => setView("problems")} savedGraph={graphRestore?.graph} onSaveResearch={saveResearchGraph} busy={busy} />}
           {view === "investigations" && currentProject && <InvestigationsView key={currentProject.project.id} projectId={currentProject.project.id} currentSnapshotId={currentProject.snapshot.id} revision={researchRevision} busy={busy} onOpen={id=>void openResearch(id)} onEdit={id=>void openResearch(id,true)} onDeleted={id=>{if(activeInvestigation?.id===id){detachResearch();setSelected(null);}}} />}
           {view === "modules" && <ModulesView analysis={analysis} onSelect={(id) => { detachResearch();selectNode(id); setView("graph"); }} />}
           {view === "packages" && <PackagesView analysis={analysis} />}
           {view === "problems" && <ProblemsView key={currentProject?.snapshot.id} activeDiagnosticId={graphDiagnostic?.id} analysis={analysis} onShowGraph={(diagnostic) => { detachResearch();setImpactScope(null); setGraphDiagnostic(diagnostic); setSelected(null); setView("graph"); }} onSelect={(id) => { detachResearch();selectNode(id); setView("graph"); }} />}
           {view === "history" && <HistoryView snapshots={snapshots} current={currentProject?.snapshot.id ?? ""} onOpen={openSnapshot} />}
           {currentProject && (gitVisited || view === "git") && <div hidden={view !== "git"}><GitView key={currentProject.project.id} root={analysis.summary.rootPath} projectId={currentProject.project.id} snapshot={currentProject.snapshot} analysis={analysis} externalBusy={busy} onOpen={openGitSnapshot} /></div>}
-          {currentProject && <div hidden={view !== "impact"}><ImpactView key={currentProject.snapshot.id} analysis={analysis} snapshot={currentProject.snapshot} initialRoots={impactRoots} onGraph={(scope) => { detachResearch();setImpactScope(scope); setGraphDiagnostic(null); setSelected(null); setView("graph"); }} /></div>}
+          {view==="impact"&&savedFinding&&<p role="status" className="finding-saved">Сохранено: {savedFinding}. <button onClick={()=>setView("investigations")}>К исследованиям</button></p>}
+          {currentProject && <div hidden={view !== "impact"}><ImpactView key={currentProject.snapshot.id} analysis={analysis} snapshot={currentProject.snapshot} initialRoots={impactRoots} externalBusy={busy} onBackToFile={impactReturn?.snapshotId===currentProject.snapshot.id?returnToFile:undefined} onSaveFindings={(summary,note)=>{
+            const graph=graphForImpactRoot(analysis,summary.roots[0]);
+            if(!graph||busy||summary.snapshotId!==currentProject.snapshot.id)return;
+            setResearchDraft({snapshotId:summary.snapshotId,graph,name:findingName(summary.roots[0]),note,explanation:"Сохраняются заметка с параметрами, результатом и открытым сегментом пути и граф потребителей первого исходного файла на этом снимке. При открытии восстановится граф; весь список Impact и его фильтры автоматически не восстанавливаются."});
+          }} onGraph={(scope) => { detachResearch();setImpactScope(scope); setGraphDiagnostic(null); setSelected(null); setView("graph"); }} /></div>}
           <div className="status-line"><span><ShieldCheck size={13} /> Исходный код не запускается</span><span><Clock3 size={13} /> Снимок {formatDate(currentProject?.snapshot.createdAt ?? 0)} · анализатор {currentProject?.snapshot.analyzerVersion ?? "—"}</span></div>
         </>}
       </main>
 
       {analysis && view === "graph" && detailsOpen && <aside className="details-panel"><div className="details-head"><div><span className="sidebar-caption">КОНТЕКСТ</span><h3>{selectedNode ? "Выбранный узел" : "Сводка проекта"}</h3></div><button className="icon-button" onClick={() => setDetailsOpen(false)} aria-label="Скрыть панель"><PanelRightClose size={17} /></button></div>
+        {selectedEdge&&analysis.edges.some(edge=>edge.id===selectedEdge)&&<div className="relation-evidence"><b>Основание связи</b>{analysis.edges.filter(edge=>edge.id===selectedEdge).map(edge=><div key={edge.id}><button onClick={()=>selectNode(edge.source,edge.id)}>{edge.source}:{edge.line}</button><span> → </span><button onClick={()=>selectNode(edge.target,edge.id)}>{edge.target}</button><small>{edge.kind} · строка в импортирующем файле</small></div>)}</div>}
         {selectedNode ? <NodeDetails key={selectedNode.id} node={selectedNode} analysis={analysis} onSelect={selectNode} onImpact={openImpact} /> : <>
           <div className="detail-empty"><div className="detail-empty-icon"><CircleDot size={20} /></div><b>Выберите узел графа</b><span>Здесь появятся сведения о связях, языке и размере модуля.</span></div>
           <div className="detail-section"><div className="detail-section-title">СОСТАВ ГРАФА</div><DetailMetric label="Исходные файлы" value={analysis.summary.sourceFileCount} /><DetailMetric label="Внутренние связи" value={analysis.summary.dependencyCount} /><DetailMetric label="Внешние пакеты" value={analysis.summary.packages.length} /></div>
@@ -271,7 +300,7 @@ function Welcome({ busy, error, onOpen }: { busy: boolean; error: string | null;
     <span className="welcome-kicker"><Sparkles size={14} /> ПОНИМАЙТЕ СВОЙ КОД</span><h1>Архитектура проекта.<br /><span>Наглядно и по делу.</span></h1><p>Откройте локальный репозиторий, чтобы построить реальную карту исходных файлов и их зависимостей. Код проекта остаётся на вашем компьютере.</p><button className="primary-button welcome-button" disabled={busy} onClick={onOpen}>{busy ? <LoaderCircle className="spin" size={17} /> : <FolderOpen size={17} />}{busy ? "Индексируем проект…" : "Открыть проект"}<ArrowRight size={16} /></button>{error && <div className="welcome-error"><AlertTriangle size={15} />{error}</div>}<div className="welcome-foot"><span><ShieldCheck size={14} /> Без запуска кода</span><span><Code2 size={14} /> JS · TS · TSX</span><span><Share2 size={14} /> Локально</span></div></div></div>;
 }
 
-function Overview({ analysis, onOpenGraph, onSelect }: { analysis: AnalysisResult; onOpenGraph: () => void; onSelect: (id: string) => void }) {
+function Overview({ analysis, onOpenGraph, onSelect,location,onChange }: { analysis: AnalysisResult; onOpenGraph: () => void; onSelect: (id: string,edgeId?:string) => void;location:ArchitectureLocation;onChange:Dispatch<SetStateAction<ArchitectureLocation>> }) {
   const { summary } = analysis;
   return <div className="overview-grid"><section className="stats-grid">
     <StatCard icon={FileCode2} label="Исходные файлы" value={summary.sourceFileCount} tone="blue" meta={`${summary.sourceLines.toLocaleString("ru-RU")} строк исходника`} />
@@ -282,7 +311,7 @@ function Overview({ analysis, onOpenGraph, onSelect }: { analysis: AnalysisResul
     <StatCard icon={Unplug} label="Не разрешено" value={summary.unresolvedCount + summary.ambiguousCount} tone={summary.unresolvedCount || summary.ambiguousCount ? "amber" : "green"} meta="импортов и неоднозначных ссылок" />
   </section>
   <section className="panel graph-preview"><div className="panel-heading"><div><span className="eyebrow">КАРТА ПРОЕКТА</span><h2>Зависимости</h2></div><button className="text-button" onClick={onOpenGraph}>Исследовать граф <ArrowRight size={14} /></button></div>
-    <MiniGraph analysis={analysis} onSelect={onSelect} /></section>
+    <ArchitectureMap analysis={analysis} location={location} onChange={onChange} onSelect={onSelect} /></section>
   <div className="overview-lower"><section className="panel lower-panel"><div className="panel-heading"><div><span className="eyebrow">СОСТАВ КОДА</span><h2>Языки</h2></div><Code2 size={17} className="panel-icon" /></div>{summary.languages.length ? summary.languages.map((lang) => <div className="language-line" key={lang.name}><span className="language-name"><i className="language-dot" />{lang.name}</span><div className="language-track"><i style={{ width: `${Math.max(3, (lang.count / Math.max(summary.sourceFileCount, 1)) * 100)}%` }} /></div><span className="language-count">{lang.count}</span></div>) : <EmptyRow text="Поддерживаемые исходные файлы не найдены." />}</section>
     <section className="panel lower-panel"><div className="panel-heading"><div><span className="eyebrow">ПРОВЕРКА ПАРСЕРА</span><h2>Покрытие анализа</h2></div><ShieldCheck size={17} className="panel-icon" /></div><DetailMetric label="Ошибки разбора" value={summary.parseErrorCount} /><DetailMetric label="Всего файлов в проекте" value={summary.fileCount} /><DetailMetric label="Строк в исходных файлах" value={summary.sourceLines} /><div className="coverage-note">Учитываются все строки поддерживаемых исходных файлов, включая пустые и комментарии.</div></section></div>
   </div>;
@@ -292,17 +321,7 @@ function StatCard({ icon: Icon, label, value, tone, meta }: { icon: typeof FileC
   return <div className={`stat-card tone-${tone}`}><div className="stat-top"><div className="stat-icon"><Icon size={18} /></div><span className="stat-label">{label}</span></div><div className="stat-value">{value.toLocaleString("ru-RU")}</div><div className="stat-meta">{meta}</div></div>;
 }
 
-function MiniGraph({ analysis, onSelect }: { analysis: AnalysisResult; onSelect: (id: string) => void }) {
-  const files = analysis.nodes.filter((n) => n.kind === "file").slice(0, 36);
-  const width = 780; const height = 310; const cols = 6; const pos = new Map(files.map((n, i) => [n.id, { x: 45 + (i % cols) * 124, y: 36 + Math.floor(i / cols) * 44 }]));
-  const shown = new Set(files.map((n) => n.id));
-  return <div className="mini-graph"><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Предпросмотр графа файлов">
-    {analysis.edges.filter((e) => e.kind !== "package" && shown.has(e.source) && shown.has(e.target)).slice(0, 90).map((e) => { const a = pos.get(e.source)!; const b = pos.get(e.target)!; return <path key={e.id} d={`M ${a.x + 70} ${a.y + 14} C ${(a.x + b.x) / 2} ${a.y + 14}, ${(a.x + b.x) / 2} ${b.y + 14}, ${b.x} ${b.y + 14}`} className="mini-edge" />; })}
-    {files.map((node) => { const p = pos.get(node.id)!; return <g key={node.id} className="mini-node" onClick={() => onSelect(node.id)}><rect x={p.x} y={p.y} width="78" height="27" rx="7" /><circle cx={p.x + 11} cy={p.y + 13} r="3" /><text x={p.x + 19} y={p.y + 17}>{node.label.length > 10 ? `${node.label.slice(0, 9)}…` : node.label}</text></g>; })}
-  </svg>{analysis.nodes.filter((n) => n.kind === "file").length > 36 && <div className="graph-overflow">Показаны первые 36 узлов предпросмотра. Откройте полный граф для всей выборки.</div>}</div>;
-}
-
-function NodeDetails({ node, analysis, onSelect, onImpact }: { node: GraphNode; analysis: AnalysisResult; onSelect: (id: string) => void; onImpact: (id: string) => void }) {
+function NodeDetails({ node, analysis, onSelect, onImpact }: { node: GraphNode; analysis: AnalysisResult; onSelect: (id: string,edgeId?:string) => void; onImpact: (id: string) => void }) {
   const [relationLimit, setRelationLimit] = useState(50);
   const inbound = analysis.edges.filter((e) => e.target === node.id); const outbound = analysis.edges.filter((e) => e.source === node.id);
   const resolve = (id: string) => analysis.nodes.find((n) => n.id === id)?.path ?? id;
@@ -310,8 +329,8 @@ function NodeDetails({ node, analysis, onSelect, onImpact }: { node: GraphNode; 
   return <div className="node-details"><div className={`node-detail-icon ${node.kind}`}><NodeIcon size={20} /></div><h2>{node.label}</h2><div className="node-detail-path">{node.path}</div><div className="node-tags"><span>{node.kind === "package" ? "ВНЕШНИЙ ПАКЕТ" : node.language?.toUpperCase() ?? "РЕСУРС"}</span>{node.kind === "package" && <span>{node.declared ? "ОБЪЯВЛЕН" : "НЕ ОБЪЯВЛЕН"}</span>}</div>
     {node.kind === "file" && <button className="text-button impact-action" onClick={() => onImpact(node.id)}><Share2 size={14} />Анализ влияния</button>}
     <div className="detail-section"><div className="detail-section-title">МЕТРИКИ</div><DetailMetric label="Строки кода" value={node.lines || "—"} /><DetailMetric label="Входящие" value={node.incoming} /><DetailMetric label="Исходящие" value={node.outgoing} /></div>
-    <div className="detail-section"><div className="detail-section-title">ИМПОРТИРУЕТ · {outbound.length}</div>{outbound.length ? outbound.slice(0, relationLimit).map((edge) => <button className="relation-row relation-link" key={edge.id} onClick={() => onSelect(edge.target)}><ArrowRight size={13} /><span>{resolve(edge.target)}</span><small>{edge.kind === "type_only_import" ? "type" : edge.kind}</small></button>) : <EmptyRow text="Нет обнаруженных исходящих связей." />}</div>
-    <div className="detail-section"><div className="detail-section-title">ИСПОЛЬЗУЕТСЯ В · {inbound.length}</div>{inbound.length ? inbound.slice(0, relationLimit).map((edge) => <button className="relation-row relation-link" key={edge.id} onClick={() => onSelect(edge.source)}><ArrowLeft size={13} /><span>{resolve(edge.source)}</span><small>:{edge.line}</small></button>) : <EmptyRow text="Входящие импорты не найдены." />}</div>
+    <div className="detail-section"><div className="detail-section-title">ИМПОРТИРУЕТ · {outbound.length}</div>{outbound.length ? outbound.slice(0, relationLimit).map((edge) => <button className="relation-row relation-link" key={edge.id} onClick={() => onSelect(edge.target,edge.id)}><ArrowRight size={13} /><span>{resolve(edge.target)}</span><small>:{edge.line} · {edge.kind === "type_only_import" ? "type" : edge.kind}</small></button>) : <EmptyRow text="Нет обнаруженных исходящих связей." />}</div>
+    <div className="detail-section"><div className="detail-section-title">ИСПОЛЬЗУЕТСЯ В · {inbound.length}</div>{inbound.length ? inbound.slice(0, relationLimit).map((edge) => <button className="relation-row relation-link" key={edge.id} onClick={() => onSelect(edge.source,edge.id)}><ArrowLeft size={13} /><span>{resolve(edge.source)}</span><small>:{edge.line}</small></button>) : <EmptyRow text="Входящие импорты не найдены." />}</div>
     {(inbound.length > relationLimit || outbound.length > relationLimit) && <button className="text-button" onClick={() => setRelationLimit(relationLimit + 50)}>Показать ещё связи (сейчас до {relationLimit})</button>}
   </div>;
 }

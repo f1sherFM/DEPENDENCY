@@ -1,6 +1,6 @@
 use std::path::Path;
 use tree_sitter::Language;
-pub const CACHE_VERSIONS: [&str; 3] = ["js-ts-parser-2", "rust-parser-1", "python-parser-1"];
+pub const CACHE_VERSIONS: [&str; 3] = ["js-ts-parser-2", "rust-parser-1", "python-parser-3"];
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -17,8 +17,8 @@ pub fn profile(languages: &[&str], roots: &[String]) -> AnalysisProfile {
     let mut limitations = Vec::new();
     for language in languages {
         let (parser, resolver) = match *language {
-            "Rust" => ("rust-parser-1", "rust-resolver-2"),
-            "Python" => ("python-parser-1", "python-resolver-1"),
+            "Rust" => ("rust-parser-1", "rust-resolver-3"),
+            "Python" => ("python-parser-3", "python-resolver-2"),
             _ => ("js-ts-parser-2", "js-ts-resolver-4"),
         };
         analyzers.insert(language.to_string(), (parser.into(), resolver.into()));

@@ -4,12 +4,19 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Fact {
+    PythonBinding {
+        name: String,
+        binding: PythonBinding,
+        conditional: bool,
+    },
     RustItem {
         context: Vec<String>,
         name: String,
         conditional: bool,
     },
     Python {
+        #[serde(default)]
+        statement: Option<usize>,
         module: String,
         names: Vec<String>,
         relative: usize,
@@ -30,6 +37,19 @@ pub enum Fact {
     Gap {
         reason: String,
     },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum PythonBinding {
+    Definition,
+    Import {
+        statement: usize,
+        module: String,
+        name: Option<String>,
+        relative: usize,
+    },
+    Unknown,
 }
 
 #[derive(Clone)]

@@ -1,7 +1,7 @@
 //! Data-only language facts. Project discovery and resolution never execute code.
 use crate::{
     language::SourceLanguage,
-    parse_facts::{Fact, ImportDecl},
+    parse_facts::{Fact, ImportDecl, PythonBinding},
 };
 use tree_sitter::{Node, Parser};
 
@@ -33,13 +33,22 @@ pub(crate) fn parse(
         .parse(source, None)
         .ok_or("Parser returned no tree")?;
     let mut out = Vec::new();
+    if matches!(language, SourceLanguage::Python) {
+        python_bindings(tree.root_node(), source, &mut out);
+    }
     let mut stack = vec![(tree.root_node(), Vec::<String>::new(), false)];
     while let Some((node, context, inherited)) = stack.pop() {
         let mut next_context = context.clone();
         let mut conditional = inherited
             || matches!(
                 node.kind(),
-                "if_statement" | "try_statement" | "match_statement" | "function_definition"
+                "if_statement"
+                    | "try_statement"
+                    | "match_statement"
+                    | "function_definition"
+                    | "for_statement"
+                    | "while_statement"
+                    | "with_statement"
             );
         match language {
             SourceLanguage::Python => match node.kind() {
@@ -59,6 +68,7 @@ pub(crate) fn parse(
                                 node,
                                 request.into(),
                                 Fact::Python {
+                                    statement: Some(node.start_byte()),
                                     module: request.into(),
                                     names: vec![],
                                     relative: 0,
@@ -93,6 +103,7 @@ pub(crate) fn parse(
                         node,
                         text(node, source).into(),
                         Fact::Python {
+                            statement: Some(node.start_byte()),
                             module: module.trim_start_matches('.').into(),
                             names,
                             relative,
@@ -227,6 +238,183 @@ pub(crate) fn parse(
     Ok((out, tree.root_node().has_error()))
 }
 
+// Module namespace facts are deliberately separate from dependency requests.
+// Never descend into function/class bodies to discover module bindings.
+fn python_bindings(root: Node, source: &str, out: &mut Vec<ImportDecl>) {
+    fn record(
+        out: &mut Vec<ImportDecl>,
+        node: Node,
+        name: &str,
+        binding: PythonBinding,
+        conditional: bool,
+    ) {
+        push(
+            out,
+            node,
+            format!("#binding:{name}"),
+            Fact::PythonBinding {
+                name: name.into(),
+                binding,
+                conditional,
+            },
+        );
+        out.last_mut().unwrap().kind = "binding".into();
+    }
+    let mut stack = vec![(root, false)];
+    if root.has_error() {
+        record(out, root, "*", PythonBinding::Unknown, true);
+    }
+    while let Some((node, inherited)) = stack.pop() {
+        let conditional = inherited
+            || matches!(
+                node.kind(),
+                "if_statement"
+                    | "try_statement"
+                    | "for_statement"
+                    | "while_statement"
+                    | "with_statement"
+                    | "match_statement"
+                    | "case_clause"
+            );
+        match node.kind() {
+            "function_definition" | "class_definition" => {
+                if let Some(name) = node.child_by_field_name("name") {
+                    record(
+                        out,
+                        node,
+                        text(name, source),
+                        PythonBinding::Definition,
+                        conditional,
+                    );
+                }
+                continue;
+            }
+            "import_statement" => {
+                for child in children(node) {
+                    let name = child.child_by_field_name("name").unwrap_or(child);
+                    let module = text(name, source);
+                    let alias = child.child_by_field_name("alias").map(|n| text(n, source));
+                    let bound = alias.unwrap_or(module.split('.').next().unwrap_or(module));
+                    let requested = if alias.is_some() { module } else { bound };
+                    record(
+                        out,
+                        node,
+                        bound,
+                        PythonBinding::Import {
+                            statement: node.start_byte(),
+                            module: requested.into(),
+                            name: None,
+                            relative: 0,
+                        },
+                        conditional,
+                    );
+                }
+                continue;
+            }
+            "import_from_statement" => {
+                let module_node = node.child_by_field_name("module_name");
+                let module = module_node.map(|n| text(n, source)).unwrap_or("");
+                let relative = module.chars().take_while(|c| *c == '.').count();
+                for child in children(node)
+                    .into_iter()
+                    .filter(|n| Some(*n) != module_node)
+                {
+                    if child.kind() == "wildcard_import" {
+                        record(out, node, "*", PythonBinding::Unknown, true);
+                    } else if matches!(child.kind(), "dotted_name" | "aliased_import") {
+                        let name = text(child.child_by_field_name("name").unwrap_or(child), source);
+                        let alias = child
+                            .child_by_field_name("alias")
+                            .map(|n| text(n, source))
+                            .unwrap_or(name);
+                        record(
+                            out,
+                            node,
+                            alias,
+                            PythonBinding::Import {
+                                statement: node.start_byte(),
+                                module: module.trim_start_matches('.').into(),
+                                name: Some(name.into()),
+                                relative,
+                            },
+                            conditional,
+                        );
+                    }
+                }
+                continue;
+            }
+            "assignment" | "augmented_assignment" => {
+                if let Some(left) = node.child_by_field_name("left") {
+                    if left.kind() == "identifier" {
+                        if node.child_by_field_name("right").is_some() {
+                            record(
+                                out,
+                                node,
+                                text(left, source),
+                                if node.kind() == "assignment" {
+                                    PythonBinding::Definition
+                                } else {
+                                    PythonBinding::Unknown
+                                },
+                                conditional,
+                            );
+                        }
+                    } else {
+                        record(out, node, "*", PythonBinding::Unknown, true);
+                    }
+                }
+            }
+            "type_alias_statement" => {
+                if let Some(mut name) = node.child_by_field_name("left") {
+                    while name.kind() != "identifier" && name.named_child_count() > 0 {
+                        name = name.named_child(0).unwrap();
+                    }
+                    if name.kind() == "identifier" {
+                        record(
+                            out,
+                            node,
+                            text(name, source),
+                            PythonBinding::Definition,
+                            conditional,
+                        );
+                    } else {
+                        record(out, node, "*", PythonBinding::Unknown, true);
+                    }
+                }
+                continue;
+            }
+            "delete_statement" | "named_expression" | "for_statement" | "with_statement"
+            | "match_statement" => record(out, node, "*", PythonBinding::Unknown, true),
+            "call" => {
+                if node.child_by_field_name("function").is_some_and(|n| {
+                    matches!(
+                        text(n, source),
+                        "exec"
+                            | "eval"
+                            | "globals"
+                            | "locals"
+                            | "setattr"
+                            | "__import__"
+                            | "importlib.import_module"
+                    )
+                }) {
+                    record(out, node, "*", PythonBinding::Unknown, true);
+                }
+                if node
+                    .child_by_field_name("function")
+                    .is_some_and(|n| text(n, source).starts_with("__path__."))
+                {
+                    record(out, node, "__path__", PythonBinding::Unknown, true);
+                }
+            }
+            _ => {}
+        }
+        for child in children(node).into_iter().rev() {
+            stack.push((child, conditional));
+        }
+    }
+}
+
 fn use_paths(node: Node, source: &str, prefix: &str) -> Vec<String> {
     match node.kind() {
         "use_list" => children(node)
@@ -255,8 +443,50 @@ fn use_paths(node: Node, source: &str, prefix: &str) -> Vec<String> {
 mod tests {
     use super::*;
     #[test]
+    fn python_313_type_defaults_preserve_imports_and_reject_broken_code() {
+        let cases = [
+            "class Box[T = int]:\n pass\n",
+            "class Box[T: Bound = Default]:\n pass\n",
+            "class Box[T: (int, str) = int]:\n pass\n",
+            "class Box[*Ts = *tuple[int, str]]:\n pass\n",
+            "class Box[**P = [int, str]]:\n pass\n",
+            "def call[T = int, **P = ...](x: T) -> T:\n return x\n",
+            "async def call[T = int](x: T) -> T:\n return x\n",
+            "type Alias[T = int] = list[T]\n",
+            "type Alias[*Ts = *tuple[int, str]] = tuple[*Ts]\n",
+            "type Alias[**P = [int, str]] = Callable[P, int]\n",
+            "class NewStyleGenerics[\n TypeVarDefault=int,\n *FollowingTuple=*tuple[int, ...] # noqa: WPS477\n]:\n pass\n",
+        ];
+        for case in cases {
+            let source = format!("from .before import Value\n{case}from .after import Other\n");
+            let (facts, error) = parse(&source, SourceLanguage::Python).unwrap();
+            assert!(!error, "valid Python 3.13 declaration: {case}");
+            let imports: Vec<_> = facts
+                .iter()
+                .filter(|fact| matches!(fact.facts, Some(Fact::Python { .. })))
+                .collect();
+            assert_eq!(imports.len(), 2);
+            assert_eq!(imports[0].line, 1);
+            assert_eq!(imports[1].line, source.lines().count());
+        }
+        for source in [
+            "class Bad[T = ]:\n pass\n",
+            "def bad[T = int](\n",
+            "type Bad[T = int = str] = T\n",
+            "type Bad = list[T = int]\n",
+            "import pkg as\n",
+            "def bad():\n  x = (\n",
+        ] {
+            assert!(
+                parse(source, SourceLanguage::Python).unwrap().1,
+                "broken syntax must not be hidden: {source}"
+            );
+        }
+    }
+    #[test]
     fn python_facts_keep_relative_imports_conditions_and_dynamic_gaps() {
-        let (facts,error)=parse("from ..pkg import thing as alias\nif TYPE_CHECKING:\n import typing\nimportlib.import_module(name)\n",SourceLanguage::Python).unwrap();
+        let (mut facts,error)=parse("from ..pkg import thing as alias\nif TYPE_CHECKING:\n import typing\nimportlib.import_module(name)\n",SourceLanguage::Python).unwrap();
+        facts.retain(|fact| !matches!(fact.facts, Some(Fact::PythonBinding { .. })));
         assert!(!error);
         assert!(
             matches!(&facts[0].facts,Some(Fact::Python {relative:2,module,names,..}) if module=="pkg" && names==&vec!["thing".to_string()])

@@ -1,6 +1,110 @@
 use crate::{analysis, storage};
 use std::{fs, path::Path};
 #[test]
+fn cargo_workspace_path_inheritance_uses_defining_workspace_not_member_directory() {
+    let root = fixture();
+    write(
+        root.path(),
+        "Cargo.toml",
+        "[workspace]\nmembers=['crates/*']\n[workspace.dependencies]\nlocal={package='helper',path='crates/helper'}\n",
+    );
+    write(
+        root.path(),
+        "crates/app/Cargo.toml",
+        "[package]\nname='app'\nversion='0.1.0'\n[dependencies]\nlocal.workspace=true\n",
+    );
+    write(root.path(), "crates/app/src/lib.rs", "use local::Thing;\n");
+    write(
+        root.path(),
+        "crates/helper/Cargo.toml",
+        "[package]\nname='helper'\nversion='0.1.0'\n",
+    );
+    write(
+        root.path(),
+        "crates/helper/src/lib.rs",
+        "pub struct Thing;\n",
+    );
+    let first = analysis::analyze_project(root.path().to_str().unwrap(), vec![]).unwrap();
+    assert!(
+        first
+            .result
+            .edges
+            .iter()
+            .any(|edge| edge.source == "crates/app/src/lib.rs"
+                && edge.target == "crates/helper/src/lib.rs"
+                && edge.kind == "rust_import")
+    );
+    let second =
+        analysis::analyze_project(root.path().to_str().unwrap(), first.file_cache).unwrap();
+    assert_eq!(second.parsed_file_count, 0);
+    assert_eq!(
+        serde_json::to_value(second.result.edges).unwrap(),
+        serde_json::to_value(first.result.edges).unwrap()
+    );
+    // Explicit workspace outside the ancestor chain, but inside captured scope.
+    write(
+        root.path(),
+        "shared/Cargo.toml",
+        "[workspace]\nmembers=['../crates/app','helper']\n[workspace.dependencies]\nlocal={package='helper',path='helper'}\n",
+    );
+    write(
+        root.path(),
+        "shared/helper/Cargo.toml",
+        "[package]\nname='helper'\nversion='0.1.0'\n",
+    );
+    write(
+        root.path(),
+        "shared/helper/src/lib.rs",
+        "pub struct Thing;\n",
+    );
+    write(
+        root.path(),
+        "crates/app/Cargo.toml",
+        "[package]\nname='app'\nversion='0.1.0'\nworkspace='../../shared'\n[dependencies]\nlocal.workspace=true\n",
+    );
+    let explicit =
+        analysis::analyze_project(root.path().to_str().unwrap(), second.file_cache).unwrap();
+    assert_eq!(explicit.parsed_file_count, 1); // Only the newly captured helper source.
+    assert!(
+        explicit
+            .result
+            .edges
+            .iter()
+            .any(|edge| edge.source == "crates/app/src/lib.rs"
+                && edge.target == "shared/helper/src/lib.rs")
+    );
+    assert!(
+        !explicit
+            .result
+            .edges
+            .iter()
+            .any(|edge| edge.source == "crates/app/src/lib.rs"
+                && edge.target == "crates/helper/src/lib.rs")
+    );
+    write(
+        root.path(),
+        "shared/Cargo.toml",
+        "[workspace]\nmembers=['../crates/app']\n",
+    );
+    let missing =
+        analysis::analyze_project(root.path().to_str().unwrap(), explicit.file_cache).unwrap();
+    assert_eq!(missing.parsed_file_count, 0);
+    assert!(
+        !missing
+            .result
+            .edges
+            .iter()
+            .any(|edge| edge.source == "crates/app/src/lib.rs")
+    );
+    assert!(
+        missing
+            .result
+            .diagnostics
+            .iter()
+            .any(|issue| issue.explanation.contains("Workspace dependency `local`"))
+    );
+}
+#[test]
 fn rust_super_cannot_escape_the_crate_root() {
     let root = fixture();
     write(root.path(), "src/lib.rs", "pub struct Thing;\nmod child;\n");
@@ -21,6 +125,56 @@ fn rust_super_cannot_escape_the_crate_root() {
             .resolution_issues
             .iter()
             .any(|issue| issue.source == "src/child.rs")
+    );
+}
+#[test]
+fn excluded_local_library_is_a_coverage_limit_not_a_parse_failure() {
+    let root = fixture();
+    write(
+        root.path(),
+        "Cargo.toml",
+        "[package]\nname='app'\nversion='0.1.0'\n[dependencies]\nlocal={path='vendor/local'}\n",
+    );
+    write(
+        root.path(),
+        "vendor/local/Cargo.toml",
+        "[package]\nname='local'\nversion='0.1.0'\n",
+    );
+    write(
+        root.path(),
+        "vendor/local/src/lib.rs",
+        "pub struct Thing;\n",
+    );
+    write(root.path(), "src/lib.rs", "use local::Thing;\n");
+    write(
+        root.path(),
+        "dependency.config.json",
+        r#"{"analysis":{"exclude":["vendor/**"]}}"#,
+    );
+    let result = analysis::analyze_project(root.path().to_str().unwrap(), vec![])
+        .unwrap()
+        .result;
+    assert_eq!(result.summary.parse_error_count, 0);
+    assert!(
+        result
+            .summary
+            .resolution_issues
+            .iter()
+            .any(|issue| issue.source == "Cargo.toml"
+                && issue.status == "unsupported"
+                && issue.reason.contains("Path dependency"))
+    );
+    assert!(
+        !result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.rule_id == "parse-error")
+    );
+    assert!(
+        !result
+            .nodes
+            .iter()
+            .any(|node| node.path.starts_with("vendor/"))
     );
 }
 fn write(root: &Path, path: &str, text: &str) {
@@ -123,7 +277,7 @@ fn mixed_graph_has_real_targets_separate_relations_and_reuses_all_parsers() {
     cache
         .iter_mut()
         .filter(|f| f.language == "Python")
-        .for_each(|f| f.analyzer_version = "old-python".into());
+        .for_each(|f| f.analyzer_version = "python-parser-1".into());
     let third = analysis::analyze_project(root.path().to_str().unwrap(), cache).unwrap();
     assert_eq!(third.parsed_file_count, 4);
     assert_eq!(third.reused_file_count, count - 4);
@@ -139,6 +293,7 @@ fn mixed_graph_has_real_targets_separate_relations_and_reuses_all_parsers() {
 #[test]
 fn python_ambiguity_and_attributes_never_select_arbitrary_file() {
     let root = fixture();
+    write(root.path(), "pkg/__init__.py", "");
     write(root.path(), "pkg/service.py", "");
     write(root.path(), "from.py", "from pkg import service\n");
     let result = analysis::analyze_project(root.path().to_str().unwrap(), vec![])
@@ -440,7 +595,7 @@ fn cargo_path_dependency_resolves_to_captured_library_item() {
     write(
         root.path(),
         "Cargo.toml",
-        "[package]\nname='a'\nversion='0.1.0'\n[dependencies]\nlocal={path='crates/helper'}\n",
+        "[package]\nname='a'\nversion='0.1.0'\n[dependencies]\nlocal={package='helper',path='crates/helper'}\n",
     );
     write(root.path(), "src/lib.rs", "use local::Thing;\n");
     write(

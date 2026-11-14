@@ -13,6 +13,7 @@ pub(crate) struct Resolution {
     pub issues: Vec<ResolutionIssue>,
 }
 pub(crate) struct NativeResolver {
+    python: crate::python_resolver::PythonResolver,
     paths: HashSet<String>,
     python_roots: Vec<String>,
     modules: HashMap<String, Vec<(String, Vec<String>, String)>>,
@@ -210,7 +211,10 @@ impl NativeResolver {
         };
         python_roots.sort();
         python_roots.dedup();
+        let python =
+            crate::python_resolver::PythonResolver::new(&paths, sources, python_roots.clone());
         let mut out = Self {
+            python,
             paths,
             python_roots,
             modules: HashMap::new(),
@@ -260,22 +264,43 @@ impl NativeResolver {
                     .into_iter()
                     .flatten()
                 {
-                    let inherited = if dependency.get("workspace").and_then(|v| v.as_bool())
-                        == Some(true)
+                    let inherited =
+                        if dependency.get("workspace").and_then(|v| v.as_bool()) == Some(true) {
+                            let explicit_workspace = value
+                                .get("package")
+                                .and_then(|p| p.get("workspace"))
+                                .and_then(|p| p.as_str());
+                            let explicit_manifest = explicit_workspace
+                                .and_then(|path| join(&base, path))
+                                .and_then(|path| join(&path, "Cargo.toml"));
+                            manifest_values
+                                .iter()
+                                .filter(|(p, v)| {
+                                    v.get("workspace").is_some()
+                                        && if explicit_workspace.is_some() {
+                                            explicit_manifest.as_ref() == Some(*p)
+                                        } else {
+                                            parent(p).is_empty()
+                                                || manifest.starts_with(&(parent(p) + "/"))
+                                        }
+                                })
+                                .max_by_key(|(p, _)| p.len())
+                                .and_then(|(p, v)| {
+                                    Some((p, v.get("workspace")?.get("dependencies")?.get(alias)?))
+                                })
+                        } else {
+                            None
+                        };
+                    if dependency.get("workspace").and_then(|v| v.as_bool()) == Some(true)
+                        && inherited.is_none()
                     {
-                        manifest_values
-                            .iter()
-                            .filter(|(p, v)| {
-                                v.get("workspace").is_some()
-                                    && (parent(p).is_empty()
-                                        || manifest.starts_with(&(parent(p) + "/")))
-                            })
-                            .max_by_key(|(p, _)| p.len())
-                            .and_then(|(_, v)| v.get("workspace")?.get("dependencies")?.get(alias))
-                    } else {
-                        None
-                    };
-                    let dependency = inherited.unwrap_or(dependency);
+                        out.manifest_issues.push((manifest.clone(),format!("Workspace dependency `{alias}` не найдена в captured workspace manifest")));
+                        continue;
+                    }
+                    let dependency_base = inherited
+                        .map(|(p, _)| parent(p))
+                        .unwrap_or_else(|| base.clone());
+                    let dependency = inherited.map(|(_, v)| v).unwrap_or(dependency);
                     let package = dependency
                         .get("package")
                         .and_then(|v| v.as_str())
@@ -295,12 +320,21 @@ impl NativeResolver {
                         },
                     ));
                     if section == "dependencies" {
-                        if inherited.is_none()
-                            && let Some(path) = dependency.get("path").and_then(|v| v.as_str())
-                        {
-                            if let Some(directory) = join(&base, path)
+                        if let Some(path) = dependency.get("path").and_then(|v| v.as_str()) {
+                            if let Some(directory) = join(&dependency_base, path)
                                 && let Some(target_manifest) = join(&directory, "Cargo.toml")
                                 && let Some(target) = manifest_values.get(&target_manifest)
+                                && target
+                                    .get("package")
+                                    .and_then(|v| v.get("name"))
+                                    .and_then(|v| v.as_str())
+                                    == Some(package)
+                                && (target.get("lib").and_then(|v| v.get("path")).is_some()
+                                    || target
+                                        .get("package")
+                                        .and_then(|v| v.get("autolib"))
+                                        .and_then(|v| v.as_bool())
+                                        != Some(false))
                                 && let Some(target_file) = join(
                                     &directory,
                                     target
@@ -485,142 +519,11 @@ impl NativeResolver {
             result.issues.push(ResolutionIssue {source:source.into(),specifier:import.specifier.clone(),line:import.line,status:status.into(),reason:reason.into(),attempted_candidates:candidates,hint:"Статический профиль использует только файлы выбранного проекта; окружение и код не запускаются".into()})
         };
         match fact {
-            Fact::RustItem { .. } => {}
+            Fact::RustItem { .. } | Fact::PythonBinding { .. } => {}
             Fact::Gap { reason } => issue("unsupported", reason, vec![]),
-            Fact::Python {
-                module,
-                names,
-                relative,
-                conditional,
-            } => {
-                let mut candidates = Vec::new();
-                for root in &self.python_roots {
-                    let local = if *relative == 0 || root.is_empty() {
-                        source
-                    } else if let Some(local) = source.strip_prefix(&(root.clone() + "/")) {
-                        local
-                    } else {
-                        continue;
-                    };
-                    let mut package = parent(local)
-                        .split('/')
-                        .filter(|p| !p.is_empty())
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>();
-                    if *relative > 0 {
-                        if *relative > package.len() {
-                            continue;
-                        }
-                        for _ in 1..*relative {
-                            package.pop();
-                        }
-                    } else {
-                        package.clear();
-                    }
-                    package.extend(
-                        module
-                            .split('.')
-                            .filter(|p| !p.is_empty())
-                            .map(str::to_owned),
-                    );
-                    if let Some(base) = join(root, &package.join("/")) {
-                        candidates.push(base);
-                    }
-                }
-                candidates.sort();
-                candidates.dedup();
-                let shadowed = candidates.iter().any(|base| {
-                    let mut dir = parent(base);
-                    while !dir.is_empty() && !self.python_roots.contains(&dir) {
-                        if self.paths.contains(&format!("{dir}.py")) {
-                            return true;
-                        }
-                        dir = parent(&dir);
-                    }
-                    false
-                });
-                if shadowed {
-                    issue(
-                        "ambiguous",
-                        "A module file shadows the requested package hierarchy",
-                        candidates,
-                    );
-                    return result;
-                }
-                let mut found = BTreeSet::new();
-                let mut initializers = BTreeSet::new();
-                for base in &candidates {
-                    for file in [format!("{base}.py"), format!("{base}/__init__.py")] {
-                        if self.paths.contains(&file) {
-                            found.insert(file);
-                        }
-                    }
-                }
-                let base_files: Vec<_> = found
-                    .iter()
-                    .filter(|p| {
-                        candidates.iter().any(|base| {
-                            **p == format!("{base}.py") || **p == format!("{base}/__init__.py")
-                        })
-                    })
-                    .collect();
-                let roots_found: HashSet<_> = candidates
-                    .iter()
-                    .filter(|b| {
-                        found
-                            .iter()
-                            .any(|p| p.starts_with(&format!("{b}/")) || *p == format!("{b}.py"))
-                    })
-                    .collect();
-                if roots_found.len() > 1 || base_files.len() > 1 {
-                    issue(
-                        "ambiguous",
-                        "Python module has multiple indexed candidates",
-                        found.into_iter().collect(),
-                    );
-                } else if found.is_empty() {
-                    issue(
-                        if *relative > 0 {
-                            "unresolved"
-                        } else {
-                            "external"
-                        },
-                        "No unique local Python module; distribution mapping and runtime path are unknown",
-                        candidates,
-                    );
-                } else {
-                    for file in &found {
-                        let mut dir = parent(file);
-                        while !dir.is_empty() && !self.python_roots.contains(&dir) {
-                            let init = format!("{dir}/__init__.py");
-                            if self.paths.contains(&init) {
-                                initializers.insert(init);
-                            }
-                            dir = parent(&dir);
-                        }
-                    }
-                    found.extend(initializers);
-                    for target in found {
-                        if target != source {
-                            result.targets.push((
-                                target,
-                                if *conditional {
-                                    "conditional_import"
-                                } else {
-                                    "python_import"
-                                }
-                                .into(),
-                            ));
-                        }
-                    }
-                    if !names.is_empty() {
-                        issue(
-                            "unsupported",
-                            "from-import names may be package attributes; symbol bindings are not evaluated",
-                            vec![],
-                        );
-                    }
-                }
+            Fact::Python { .. } => {
+                let (targets, issues) = self.python.resolve(source, import);
+                return Resolution { targets, issues };
             }
             Fact::RustModule {
                 context,

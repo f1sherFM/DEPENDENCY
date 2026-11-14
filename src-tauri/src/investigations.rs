@@ -26,7 +26,7 @@ pub struct GraphState {
     pub details_open: bool,
 }
 impl GraphState {
-    fn validate(&self, result: &AnalysisResult) -> Result<(), String> {
+    pub(crate) fn validate(&self, result: &AnalysisResult) -> Result<(), String> {
         if !matches!(self.mode.as_str(), "files" | "directories")
             || !matches!(self.direction.as_str(), "both" | "incoming" | "outgoing")
         {

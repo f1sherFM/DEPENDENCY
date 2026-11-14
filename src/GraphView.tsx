@@ -1,16 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { RefObject } from "react";
+import { useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import type { Ref, RefObject } from "react";
 import { ArrowLeft, FileCode2, Folder, Maximize2, Network, Package, PanelRightClose, Save, Search, ZoomIn, ZoomOut } from "lucide-react";
 import type { AnalysisResult, Diagnostic, ImpactGraphScope, SavedGraphState } from "./types";
 import { layoutGraph, projectGraph } from "./graph";
 
-export function GraphView({ analysis, selected, onSelect, searchInput, detailsOpen, setDetailsOpen, diagnostic, onClearDiagnostic, onOpenDiagnostic, impactScope, onOpenImpact, savedGraph, onSaveResearch, busy }: {
+export type GraphHandle={capture:()=>SavedGraphState|null};
+export function GraphView({ analysis, selected, onSelect, searchInput, detailsOpen, setDetailsOpen, diagnostic, onClearDiagnostic, onOpenDiagnostic, impactScope, onOpenImpact, savedGraph, onSaveResearch, busy, captureRef,onBackToMap }: {
   analysis: AnalysisResult; selected: string | null; onSelect: (id: string) => void;
   searchInput: RefObject<HTMLInputElement | null>; detailsOpen: boolean; setDetailsOpen: (value: boolean) => void;
   diagnostic: Diagnostic | null; onClearDiagnostic: () => void; onOpenDiagnostic: () => void;
   impactScope: ImpactGraphScope | null; onOpenImpact: () => void;
   savedGraph?: SavedGraphState; onSaveResearch: (graph: SavedGraphState) => void;
   busy: boolean;
+  captureRef?:Ref<GraphHandle>;onBackToMap?:()=>void;
 }) {
   const [mode, setMode] = useState<"files" | "directories">(savedGraph?.mode ?? "directories");
   const [directory, setDirectory] = useState(savedGraph?.directory ?? "");
@@ -66,7 +68,7 @@ export function GraphView({ analysis, selected, onSelect, searchInput, detailsOp
   }, [layout, viewport.width, viewport.height, viewport.ready, focus]);
   useEffect(() => {
     if (restoreSelection.current) {
-      if (!diagnostic && !impactScope && selected === restoreSelection.current.id) return;
+      if (selected === restoreSelection.current.id) return;
       restoreSelection.current = null;
     }
     if (diagnostic || impactScope) { setMode("files"); setDirectory(""); setQuery(""); setEdgeKind(""); setShowPackages(true); setFocus(null); return; }
@@ -82,6 +84,8 @@ export function GraphView({ analysis, selected, onSelect, searchInput, detailsOp
     });
   };
   const reset = () => { onClearDiagnostic(); setMode("directories"); setDirectory(""); setQuery(""); setEdgeKind(""); setFocus(null); setShowPackages(false); onSelect(""); };
+  const capture=():SavedGraphState|null=>restoring||!viewport.ready?null:({mode,directory,query,showPackages,edgeKind,focus,direction,selectedNodeId:selected||null,detailsOpen,camera:{centerX:(viewport.width/2-camera.x)/camera.zoom,centerY:(viewport.height/2-camera.y)/camera.zoom,zoom:camera.zoom}});
+  useImperativeHandle(captureRef,()=>({capture}));
   return <div className="graph-workspace">
     {impactScope && <div className="graph-navigation impact-graph-context"><b>{impactScope.title}</b><span>Выборка: {impactScope.shownAffectedCount} потребителей из {impactScope.partial ? "не менее " : ""}{impactScope.knownAffectedCount}. {impactScope.partial && "Обход неполный."} Корни выделены зелёным.</span><button onClick={onOpenImpact}>К анализу влияния</button><button onClick={reset}>Весь проект</button></div>}
     {diagnostic && <div className="graph-navigation"><b>{diagnostic.title}</b><code>{diagnostic.ruleId}</code><button onClick={onOpenDiagnostic}>К диагностике</button><button onClick={reset}>Весь проект</button></div>}
@@ -93,9 +97,9 @@ export function GraphView({ analysis, selected, onSelect, searchInput, detailsOp
       <select aria-label="Тип связи" value={edgeKind} onChange={event => setEdgeKind(event.target.value)}><option value="">Все типы связей</option>{kinds.map(kind => <option key={kind}>{kind}</option>)}</select>
       {!detailsOpen && <button className="icon-button" onClick={() => setDetailsOpen(true)} title="Показать контекст"><PanelRightClose size={17} /></button>}
     </div></div>
-    <div className="graph-navigation"><button onClick={reset}>Весь проект</button>{directory && <><span>/ {directory}</span><button onClick={() => setDirectory(directory.split("/").slice(0, -1).join("/"))}><ArrowLeft size={13} />Выше</button></>}
+    <div className="graph-navigation">{onBackToMap&&<button onClick={onBackToMap}><ArrowLeft size={13}/>К карте проекта</button>}<button onClick={reset}>Весь проект</button>{directory && <><span>/ {directory}</span><button onClick={() => setDirectory(directory.split("/").slice(0, -1).join("/"))}><ArrowLeft size={13} />Выше</button></>}
       <button disabled={!selectedNode} onClick={() => { setFocus(selected); setMode("files"); setDirectory(""); setQuery(""); }}>Окружение узла</button>
-      <button disabled={busy || Boolean(diagnostic || impactScope) || restoring || !viewport.ready} title={diagnostic || impactScope ? "Сохранение доступно в обычном графе. Перейдите во «Весь проект»." : "Сохранить заметку и состояние этого графа на текущем снимке"} onClick={() => onSaveResearch({ mode, directory, query, showPackages, edgeKind, focus, direction, selectedNodeId: selected, detailsOpen, camera: { centerX: (viewport.width / 2 - camera.x) / camera.zoom, centerY: (viewport.height / 2 - camera.y) / camera.zoom, zoom: camera.zoom } })}><Save size={13} />Сохранить исследование</button>
+      <button disabled={busy || Boolean(diagnostic || impactScope) || restoring || !viewport.ready} title={diagnostic || impactScope ? "Сохранение доступно в обычном графе. Перейдите во «Весь проект»." : "Сохранить заметку и состояние этого графа на текущем снимке"} onClick={() => {const state=capture();if(state)onSaveResearch(state);}}><Save size={13} />Сохранить исследование</button>
       {focus && <><select aria-label="Направление связей" value={direction} onChange={event => setDirection(event.target.value as typeof direction)}><option value="both">Входящие и исходящие</option><option value="incoming">Кто импортирует</option><option value="outgoing">Что импортирует</option></select><button onClick={() => setFocus(null)}>Убрать фокус</button></>}
     </div>
     <div className="graph-canvas interactive-canvas" ref={canvas} onWheel={event => {

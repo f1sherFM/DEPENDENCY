@@ -3,11 +3,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { ArrowRight, Network, RefreshCw, X } from "lucide-react";
 import type { AnalysisResult, ImpactGraphScope, ImpactPage, ImpactPath, ImpactRow, ImpactSummary, SnapshotRecord } from "./types";
 
+import { impactFindings, isCurrentImpact } from "./researchJourney";
+
 const kinds = ["import", "reexport", "commonjs_import", "type_only_import", "dynamic_import", "python_import", "rust_import", "conditional_import", "module_declaration"];
 const kindLabels: Record<string, string> = { import: "import", reexport: "re-export", commonjs_import: "require", type_only_import: "type-only", dynamic_import: "import()", python_import: "Python import", rust_import: "Rust use", conditional_import: "Условный импорт", module_declaration: "Rust mod (структура)" };
 const reasons: Record<string, string> = { "depth-limit": "Ограничение глубины", "node-budget": "Лимит посещённых узлов", "edge-budget": "Лимит проверенных рёбер", "time-budget": "Лимит времени обхода" };
 
-export function ImpactView({ analysis, snapshot, initialRoots, onGraph }: { analysis: AnalysisResult; snapshot: SnapshotRecord; initialRoots: string[]; onGraph: (scope: ImpactGraphScope) => void }) {
+export function ImpactView({ analysis, snapshot, initialRoots, onGraph,onBackToFile,onSaveFindings,externalBusy }: { analysis: AnalysisResult; snapshot: SnapshotRecord; initialRoots: string[]; onGraph: (scope: ImpactGraphScope) => void;onBackToFile?:()=>void;onSaveFindings:(summary:ImpactSummary,note:string)=>void;externalBusy:boolean }) {
   const [roots, setRoots] = useState(initialRoots); const [picker, setPicker] = useState("");
   const [edgeKinds, setEdgeKinds] = useState(() => [...kinds.slice(0,5),...kinds.slice(5).filter(kind=>analysis.edges.some(edge=>edge.kind===kind))]); const [depth, setDepth] = useState(""); const [retry, setRetry] = useState(0);
   const [summary, setSummary] = useState<ImpactSummary | null>(null); const [page, setPage] = useState<ImpactPage | null>(null);
@@ -65,6 +67,7 @@ export function ImpactView({ analysis, snapshot, initialRoots, onGraph }: { anal
   };
   const prefix = summary?.status === "partial" ? "не менее " : "";
   return <section className="impact-view">
+    <div className="impact-journey-tools">{onBackToFile&&<button onClick={onBackToFile}>Вернуться к файлу</button>}<button disabled={externalBusy||busy||pageBusy||pathBusy||!!error||!isCurrentImpact(summary,snapshot.id,roots,edgeKinds,depth)} onClick={()=>{if(summary&&isCurrentImpact(summary,snapshot.id,roots,edgeKinds,depth))onSaveFindings(summary,impactFindings(summary,{search,testsOnly},proof?.path??null));}}>Сохранить выводы</button></div>
     <div className="panel impact-controls"><b>Исходные файлы · {roots.length}/32</b><div className="impact-roots">{roots.map(id => <button key={id} onClick={() => setRoots(roots.filter(root => root !== id))} title="Убрать исходный файл">{id}<X size={12} /></button>)}</div>
       <label>Добавить файл<input aria-label="Найти исходный файл" value={picker} onChange={event => setPicker(event.target.value)} placeholder="Путь или имя файла…" /></label>
       {choices.length > 0 && <div className="impact-choices">{choices.map(node => <button key={node.id} disabled={roots.length >= 32} onClick={() => { setRoots([...roots, node.id]); setPicker(""); }}>{node.path}</button>)}<small>Показано до 20 совпадений. Уточните путь для поиска.</small></div>}

@@ -11,7 +11,7 @@ use uuid::Uuid;
 // Keep these independent of the app release: bump only when parser output or
 // diagnostic semantics change, so UI and storage changes do not invalidate AST cache.
 pub const ANALYZER_VERSION: &str = "js-ts-parser-2";
-pub const RULES_VERSION: &str = "diagnostics-5+resolver-5";
+pub const RULES_VERSION: &str = "diagnostics-6+resolver-7";
 
 #[derive(Clone)]
 pub struct AppState {
