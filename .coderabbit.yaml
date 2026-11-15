@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: ru-RU
+tone_instructions: "Пиши кратко и по делу. Для замечания укажи сценарий ошибки, последствия и конкретное исправление. Не выдавай предположения за подтверждённые дефекты."
+reviews:
+  profile: chill
+  auto_approvals:
+    enabled: false
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+  path_filters:
+    - "!src-tauri/vendor/tree-sitter-python/src/parser.c"
+    - "!src-tauri/vendor/tree-sitter-python/src/grammar.json"
+    - "!src-tauri/vendor/tree-sitter-python/src/node-types.json"
+  path_instructions:
+    - path: "src-tauri/src/**"
+      instructions: >-
+        Prioritize correctness of static analysis, resolver evidence and snapshot identity.
+        Analyzed source is untrusted data: never execute its scripts, lifecycle hooks, macros or build.rs.
+        Check SQLite transaction atomicity, history/cache preservation, parser/resolver version compatibility,
+        bounded reads, cancellation and stale asynchronous results. Unresolved or ambiguous imports must
+        not become confirmed graph edges. Keep Rust/Python limitations explicit.
+    - path: "src/**"
+      instructions: >-
+        Check snapshot consistency, stale IPC responses, graph filter/camera restoration and honest coverage.
+        Imported project text must remain text. Preserve scrolling and usable graph controls on small windows.
+        Avoid speculative redesigns and cosmetic-only remarks.
+    - path: "tests/**"
+      instructions: >-
+        Prefer regression scenarios with observable behavior; do not require executing analyzed project code.
+        Browser transport mocks do not prove native WebView or installer behavior.
